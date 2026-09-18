@@ -114,7 +114,11 @@ class _ScanningPageState extends State<ScanningPage> {
 
   String _norm(dynamic v) {
     if (v == null) return '';
-    return v.toString().trim().replaceAll(' ', '');
+    String s = v.toString().trim().replaceAll(' ', '');
+    if (s.endsWith('.0')) {
+      s = s.substring(0, s.length - 2);
+    }
+    return s;
   }
 
   // ================= FETCH =================
@@ -424,7 +428,7 @@ class _ScanningPageState extends State<ScanningPage> {
         'INSERT INTO scanning_details (guard_name, qr_id, qr_name, lat, log, factory_code, scan_time, round_slot, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
         [
           widget.guardName,
-          p['qr_id'],
+          p['qr_id'].toString(),
           p['qr_name'],
           pos.latitude,
           pos.longitude,
@@ -443,7 +447,7 @@ class _ScanningPageState extends State<ScanningPage> {
     } catch (e) {
       final msg = e.toString();
 
-      if (msg.contains('23505')) {
+      if (msg.contains('23505') || msg.contains('UNIQUE constraint failed')) {
         _msg("ALREADY SCANNED", Colors.green);
         _fetchCheckpoints();
       } else {
@@ -482,7 +486,7 @@ class _ScanningPageState extends State<ScanningPage> {
         'INSERT INTO scanning_details (guard_name, qr_id, qr_name, lat, log, factory_code, scan_time, round_slot, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
         [
           widget.guardName,
-          p['qr_id'],
+          p['qr_id'].toString(),
           p['qr_name'],
           pos.latitude,
           pos.longitude,
@@ -710,8 +714,8 @@ class _ScanningPageState extends State<ScanningPage> {
                         txt = Colors.black87;
                         statusLabel = 'Ready for final scan';
                       } else if (scannedOnce) {
-                        bg = Colors.red.shade600;
-                        txt = Colors.white;
+                        bg = Colors.amber.shade600;
+                        txt = Colors.black87;
                         statusLabel = 'First scan registered';
                       } else {
                         bg = Colors.white;
