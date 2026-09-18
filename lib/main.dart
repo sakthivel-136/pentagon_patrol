@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:timezone/data/latest_all.dart' as tz;
 import 'package:timezone/timezone.dart' as tz;
@@ -9,6 +8,7 @@ import 'package:permission_handler/permission_handler.dart';
 
 import 'home_page.dart';
 import 'round_utils.dart';
+import 'd1_client.dart';
 
 final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
     FlutterLocalNotificationsPlugin();
@@ -27,23 +27,6 @@ Future<void> main() async {
 
   // Initialize notifications early but non-blocking
   _initializeNotifications();
-
-  // Initialize Supabase with timeout to prevent ANR
-  try {
-    await Future.any([
-      Supabase.initialize(
-        url: 'https://iztwxujppgavovmbgkrm.supabase.co',
-        anonKey:
-            'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml6dHd4dWpwcGdhdm92bWJna3JtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njg0MTY4ODMsImV4cCI6MjA4Mzk5Mjg4M30.EXtWPyOb7NXoP9s1lXorv_jxfVmB8SWUlb8MgMmLtT0',
-      ),
-      Future.delayed(const Duration(seconds: 10), () {
-        debugPrint('Supabase initialization timeout - continuing anyway');
-        throw TimeoutException('Supabase initialization timeout');
-      }),
-    ]);
-  } catch (e) {
-    debugPrint('Supabase initialization warning: $e - app will continue');
-  }
 
   runApp(const VeriPatrolApp());
 }
@@ -225,15 +208,12 @@ class _LoginScreenState extends State<LoginScreen> {
 
     setState(() => _loading = true);
 
-    final db = Supabase.instance.client;
-
     try {
-      final admin = await db
-          .from('login_info')
-          .select('name,role')
-          .eq('user_pin', pin)
-          .eq('is_active', true)
-          .maybeSingle();
+      final adminList = await D1Client.query(
+        "SELECT name, role FROM login_info WHERE user_pin = ? AND is_active = 1 LIMIT 1",
+        [pin],
+      );
+      final admin = adminList.isNotEmpty ? adminList[0] : null;
 
       if (admin != null) {
         _goHome(
@@ -246,11 +226,11 @@ class _LoginScreenState extends State<LoginScreen> {
         return;
       }
 
-      final guard = await db
-          .from('security_users')
-          .select('security_name,factory')
-          .eq('security_password', pin)
-          .maybeSingle();
+      final guardList = await D1Client.query(
+        "SELECT security_name, factory FROM security_users WHERE security_password = ? LIMIT 1",
+        [pin],
+      );
+      final guard = guardList.isNotEmpty ? guardList[0] : null;
 
       if (guard != null) {
         _goHome(
@@ -267,6 +247,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
       _showMsg("INVALID PIN");
     } catch (e) {
+      debugPrint("Login error: $e");
       _showMsg("Server Error");
     } finally {
       if (mounted) setState(() => _loading = false);

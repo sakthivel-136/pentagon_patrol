@@ -1,0 +1,8 @@
+name = "pentagon-patrol-api"
+main = "src/index.js"
+compatibility_date = "2024-09-18"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "security_rounds"
+database_id = "3f245e3f-5069-433f-b497-533f72802f8c"

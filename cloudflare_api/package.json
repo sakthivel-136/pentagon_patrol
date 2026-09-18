@@ -1,0 +1,12 @@
+{
+  "name": "pentagon-patrol-api",
+  "version": "1.0.0",
+  "description": "API for Pentagon Patrol D1 database",
+  "main": "src/index.js",
+  "scripts": {
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^3.0.0"
+  }
+}

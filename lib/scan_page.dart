@@ -6,7 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
+import 'd1_client.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
@@ -128,19 +128,11 @@ class _ScanningPageState extends State<ScanningPage> {
       _currentWindowStart = roundInfo['scanWindowOpen'] as DateTime;
       _currentWindowEnd = roundInfo['scanWindowClose'] as DateTime;
       _scanAvailable = roundInfo['isActive'] as bool;
-      final client = Supabase.instance.client;
+      final qrData = await D1Client
+          .query('SELECT * FROM qr WHERE factory_code = ? AND status = ?', [widget.factoryCode, 'active']);
 
-      final qrData = await client
-          .from('qr')
-          .select()
-          .eq('factory_code', widget.factoryCode)
-          .eq('status', 'active');
-
-      final scanData = await client
-          .from('scanning_details')
-          .select('qr_id,status')
-          .eq('factory_code', widget.factoryCode)
-          .eq('round_slot', _currentRound.toUtc().toIso8601String());
+      final scanData = await D1Client
+          .query('SELECT qr_id, status FROM scanning_details WHERE factory_code = ? AND round_slot = ?', [widget.factoryCode, _currentRound.toUtc().toIso8601String()]);
 
       final Set<String> success = {};
 
@@ -169,7 +161,7 @@ class _ScanningPageState extends State<ScanningPage> {
             'start_time': previous['start_time'],
             'waiting_time': e['waiting_time'] ?? 15,
           };
-        }).toList();
+        }).map((e) => Map<String, dynamic>.from(e)).toList();
 
         _loading = false;
       });
@@ -184,14 +176,10 @@ class _ScanningPageState extends State<ScanningPage> {
 
   Future<bool> _existsSuccess(String qr) async {
     try {
-      final res = await Supabase.instance.client
-          .from('scanning_details')
-          .select('id')
-          .eq('factory_code', widget.factoryCode)
-          .eq('qr_id', qr)
-          .eq('round_slot', _currentRound.toUtc().toIso8601String())
-          .eq('status', 'SUCCESS')
-          .maybeSingle();
+      final resList = await D1Client
+          .query('SELECT id FROM scanning_details WHERE factory_code = ? AND qr_id = ? AND round_slot = ? AND status = ? LIMIT 1',
+                 [widget.factoryCode, qr, _currentRound.toUtc().toIso8601String(), 'SUCCESS']);
+      final res = resList.isNotEmpty ? resList[0] : null;
 
       if (res != null) {
         debugPrint("ExistsSuccess true: ${res['id']}");
@@ -205,7 +193,7 @@ class _ScanningPageState extends State<ScanningPage> {
 
   Future<bool> _isOnline() async {
     final result = await Connectivity().checkConnectivity();
-    return result != ConnectivityResult.none;
+    return !result.contains(ConnectivityResult.none);
   }
 
   Future<Position?> _getCurrentPosition() async {
@@ -318,9 +306,9 @@ class _ScanningPageState extends State<ScanningPage> {
           context: context,
           barrierDismissible: false,
           builder: (context) {
-            return AlertDialog(
-              title: const Text("Scan Completed"),
-              content: const Text(
+            return const AlertDialog(
+              title: Text("Scan Completed"),
+              content: Text(
                   "All checkpoints are complete. Returning to home..."),
             );
           },
@@ -432,17 +420,20 @@ class _ScanningPageState extends State<ScanningPage> {
         return;
       }
 
-      await Supabase.instance.client.from('scanning_details').insert({
-        'guard_name': widget.guardName,
-        'qr_id': p['qr_id'],
-        'qr_name': p['qr_name'],
-        'lat': pos.latitude,
-        'log': pos.longitude,
-        'factory_code': widget.factoryCode,
-        'scan_time': DateTime.now().toUtc().toIso8601String(),
-        'round_slot': _currentRound.toUtc().toIso8601String(),
-        'status': 'SUCCESS',
-      });
+      await D1Client.query(
+        'INSERT INTO scanning_details (guard_name, qr_id, qr_name, lat, log, factory_code, scan_time, round_slot, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [
+          widget.guardName,
+          p['qr_id'],
+          p['qr_name'],
+          pos.latitude,
+          pos.longitude,
+          widget.factoryCode,
+          DateTime.now().toUtc().toIso8601String(),
+          _currentRound.toUtc().toIso8601String(),
+          'SUCCESS'
+        ],
+      );
 
       _activeQrId = null;
       _msg('SCAN UPLOADED', Colors.green);
@@ -487,17 +478,20 @@ class _ScanningPageState extends State<ScanningPage> {
         return;
       }
 
-      await Supabase.instance.client.from('scanning_details').insert({
-        'guard_name': widget.guardName,
-        'qr_id': p['qr_id'],
-        'qr_name': p['qr_name'],
-        'lat': pos.latitude,
-        'log': pos.longitude,
-        'factory_code': widget.factoryCode,
-        'scan_time': DateTime.now().toUtc().toIso8601String(),
-        'round_slot': _currentRound.toUtc().toIso8601String(),
-        'status': 'MISSED',
-      });
+      await D1Client.query(
+        'INSERT INTO scanning_details (guard_name, qr_id, qr_name, lat, log, factory_code, scan_time, round_slot, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [
+          widget.guardName,
+          p['qr_id'],
+          p['qr_name'],
+          pos.latitude,
+          pos.longitude,
+          widget.factoryCode,
+          DateTime.now().toUtc().toIso8601String(),
+          _currentRound.toUtc().toIso8601String(),
+          'MISSED'
+        ],
+      );
 
       _fetchCheckpoints();
       _msg("MARKED MISSED", Colors.red);
@@ -606,7 +600,7 @@ class _ScanningPageState extends State<ScanningPage> {
                       borderRadius: BorderRadius.circular(12),
                       boxShadow: [
                         BoxShadow(
-                          color: Colors.black.withOpacity(0.08),
+                          color: Colors.black.withValues(alpha: 0.08),
                           blurRadius: 6,
                           offset: const Offset(0, 4),
                         ),

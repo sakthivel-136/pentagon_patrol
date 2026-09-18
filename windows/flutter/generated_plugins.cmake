@@ -3,13 +3,11 @@
 #
 
 list(APPEND FLUTTER_PLUGIN_LIST
-  app_links
   audioplayers_windows
   connectivity_plus
   geolocator_windows
   permission_handler_windows
   printing
-  url_launcher_windows
 )
 
 list(APPEND FLUTTER_FFI_PLUGIN_LIST

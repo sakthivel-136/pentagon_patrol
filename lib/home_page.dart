@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
+import 'd1_client.dart';
 import 'dart:async';
 import 'round_utils.dart';
 import 'scan_page.dart';
@@ -87,9 +87,8 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _fetchFactories() async {
     try {
-      final data = await Supabase.instance.client
-          .from('factories')
-          .select('factory_code, factory_name');
+      final data = await D1Client
+          .query('SELECT factory_code, factory_name FROM factories');
       if (mounted) {
         setState(() {
           _factories = List<Map<String, dynamic>>.from(data);
@@ -109,12 +108,10 @@ class _HomePageState extends State<HomePage> {
         return;
       }
 
-      final data = await Supabase.instance.client
-          .from('factories')
-          .select('factory_name')
-          .eq('factory_code', _selectedFactoryCode)
-          .single();
-      if (mounted) {
+      final dataList = await D1Client
+          .query('SELECT factory_name FROM factories WHERE factory_code = ? LIMIT 1', [_selectedFactoryCode]);
+      final data = dataList.isNotEmpty ? dataList[0] : null;
+      if (mounted && data != null) {
         setState(() => _factoryName = data['factory_name']);
       }
     } catch (e) {
@@ -178,7 +175,6 @@ class _HomePageState extends State<HomePage> {
     }
     
     setState(() => _isLoadingStatus = true);
-    final client = Supabase.instance.client;
     final now = DateTime.now();
     final roundInfo = _getCurrentRoundSlot();
     final roundStart = roundInfo['currentRoundTime'] as DateTime;
@@ -187,17 +183,11 @@ class _HomePageState extends State<HomePage> {
     
     try {
       // *** CRITICAL: Always filter by factory_code for independent factory operations ***
-      final totalRes = await client
-          .from('qr')
-          .select('qr_id')
-          .eq('factory_code', _selectedFactoryCode)
-          .eq('status', 'active');
+      final totalRes = await D1Client
+          .query('SELECT qr_id FROM qr WHERE factory_code = ? AND status = ?', [_selectedFactoryCode, 'active']);
       
-      final scannedRes = await client
-          .from('scanning_details')
-          .select('qr_id, status')
-          .eq('factory_code', _selectedFactoryCode)
-          .eq('round_slot', roundStart.toUtc().toIso8601String());
+      final scannedRes = await D1Client
+          .query('SELECT qr_id, status FROM scanning_details WHERE factory_code = ? AND round_slot = ?', [_selectedFactoryCode, roundStart.toUtc().toIso8601String()]);
 
       final uniqueScans = <String>{};
       for (var scan in scannedRes) {
@@ -208,7 +198,7 @@ class _HomePageState extends State<HomePage> {
           
       String status = "In Progress";
       // Only mark as success if THIS FACTORY has completed all scans
-      if (uniqueScans.length >= totalRes.length && totalRes.length > 0) {
+      if (uniqueScans.length >= totalRes.length && totalRes.isNotEmpty) {
         status = "Success";
       } else if (isScanWindowClosed) {
         status = "Missed";
@@ -283,18 +273,14 @@ class _HomePageState extends State<HomePage> {
     setState(() => _isLoadingStatus = true);
     try {
       final now = DateTime.now();
-      final client = Supabase.instance.client;
       List<Map<String, dynamic>> slots = [];
       final rounds = buildPatrolRounds(now);
       final currentInfo = getCurrentPatrolRound(now);
       final currentRound = currentInfo['current'] as PatrolRound;
       final currentIndex = rounds.indexWhere((round) => round.time == currentRound.time);
 
-      final qrData = await client
-          .from('qr')
-          .select('qr_id')
-          .eq('factory_code', _selectedFactoryCode)
-          .eq('status', 'active');
+      final qrData = await D1Client
+          .query('SELECT qr_id FROM qr WHERE factory_code = ? AND status = ?', [_selectedFactoryCode, 'active']);
       int totalQrCount = qrData.length;
 
       if (totalQrCount == 0) {
@@ -315,11 +301,8 @@ class _HomePageState extends State<HomePage> {
           List<dynamic> scannedData = [];
 
           if (i < currentIndex) {
-            scannedData = await client
-                .from('scanning_details')
-                .select('qr_id, status, guard_name')
-                .eq('factory_code', _selectedFactoryCode)
-                .eq('round_slot', slotTime.toUtc().toIso8601String());
+            scannedData = await D1Client
+                .query('SELECT qr_id, status, guard_name FROM scanning_details WHERE factory_code = ? AND round_slot = ?', [_selectedFactoryCode, slotTime.toUtc().toIso8601String()]);
 
             final seenQrIds = <String>{};
             for (var scan in scannedData) {
@@ -376,17 +359,10 @@ class _HomePageState extends State<HomePage> {
   void _showRoundDetails(Map<String, dynamic> slot) async {
     final slotTime = slot['time'] as DateTime;
     try {
-      final client = Supabase.instance.client;
-      final allQrData = await client
-          .from('qr')
-          .select('qr_id, qr_name')
-          .eq('factory_code', _selectedFactoryCode)
-          .eq('status', 'active');
-      final scanDetails = await client
-          .from('scanning_details')
-          .select('qr_id, qr_name, guard_name, scan_time, status')
-          .eq('factory_code', _selectedFactoryCode)
-          .eq('round_slot', slotTime.toUtc().toIso8601String());
+      final allQrData = await D1Client
+          .query('SELECT qr_id, qr_name FROM qr WHERE factory_code = ? AND status = ?', [_selectedFactoryCode, 'active']);
+      final scanDetails = await D1Client
+          .query('SELECT qr_id, qr_name, guard_name, scan_time, status FROM scanning_details WHERE factory_code = ? AND round_slot = ?', [_selectedFactoryCode, slotTime.toUtc().toIso8601String()]);
       Map<String, dynamic> scannedQrMap = {};
       for (var scan in scanDetails) {
         scannedQrMap[scan['qr_id'].toString()] = scan;
