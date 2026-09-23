@@ -34,6 +34,10 @@ class _ScanningPageState extends State<ScanningPage> {
 
   List<Map<String, dynamic>> _checkpoints = [];
 
+  // Fix 5: Cache QR list — it never changes mid-session.
+  // Only scanning_details are re-fetched on every sync tick.
+  List<Map<String, dynamic>> _cachedQrData = [];
+
   bool _loading = true;
   bool _isProcessing = false;
 
@@ -73,7 +77,9 @@ class _ScanningPageState extends State<ScanningPage> {
     });
     _fetchCheckpoints();
 
-    _syncTimer = Timer.periodic(const Duration(seconds: 20), (_) {
+    // Fix 4: Increased from 20s → 60s. Scans still update immediately
+    // after each save via _fetchCheckpoints() — guards won't notice.
+    _syncTimer = Timer.periodic(const Duration(seconds: 60), (_) {
       _fetchCheckpoints();
     });
   }
@@ -132,14 +138,24 @@ class _ScanningPageState extends State<ScanningPage> {
       _currentWindowStart = roundInfo['scanWindowOpen'] as DateTime;
       _currentWindowEnd = roundInfo['scanWindowClose'] as DateTime;
       _scanAvailable = roundInfo['isActive'] as bool;
-      final qrData = await D1Client
-          .query('SELECT * FROM qr WHERE factory_code = ? AND status = ?', [widget.factoryCode, 'active']);
 
-      final scanData = await D1Client
-          .query('SELECT qr_id, status FROM scanning_details WHERE factory_code = ? AND round_slot = ?', [widget.factoryCode, _currentRound.toUtc().toIso8601String()]);
+      // Fix 3 + Fix 5: Fetch QR list only once per session (it never changes).
+      // Only re-fetch scanning_details on every sync tick (it does change).
+      if (_cachedQrData.isEmpty) {
+        _cachedQrData = List<Map<String, dynamic>>.from(
+          await D1Client.query(
+            'SELECT qr_id, qr_name, waiting_time FROM qr WHERE factory_code = ? AND status = ?',
+            [widget.factoryCode, 'active'],
+          ),
+        );
+      }
+
+      final scanData = await D1Client.query(
+        'SELECT qr_id, status FROM scanning_details WHERE factory_code = ? AND round_slot = ?',
+        [widget.factoryCode, _currentRound.toUtc().toIso8601String()],
+      );
 
       final Set<String> success = {};
-
       for (var e in scanData) {
         if (e['status'] == 'SUCCESS') {
           success.add(_norm(e['qr_id']));
@@ -149,7 +165,7 @@ class _ScanningPageState extends State<ScanningPage> {
       if (!mounted) return;
 
       setState(() {
-        _checkpoints = qrData.map((e) {
+        _checkpoints = _cachedQrData.map((e) {
           final id = _norm(e['qr_id']);
           final previous = _checkpoints.firstWhere(
             (old) => _norm(old['qr_id']) == id,
@@ -383,18 +399,16 @@ class _ScanningPageState extends State<ScanningPage> {
     }
 
     if (!p['scanned_once'] && p['waiting_done'] == false) {
-      if (await _existsSuccess(qrId)) {
-        _msg("ALREADY SCANNED", Colors.green);
-        _fetchCheckpoints();
-        return;
-      }
-
+      // Fix 6: No HTTP check here — p['completed'] guard above already
+      // catches already-scanned QRs via the local state from _fetchCheckpoints().
       _startTimer(index);
       return;
     }
 
     // ---------- SECOND SCAN ----------
     if (p['waiting_done'] == true) {
+      // Keep one final _existsSuccess guard right before INSERT to prevent
+      // duplicate rows in the rare case of race conditions between guards.
       if (await _existsSuccess(qrId)) {
         _msg("ALREADY SCANNED", Colors.green);
         _fetchCheckpoints();

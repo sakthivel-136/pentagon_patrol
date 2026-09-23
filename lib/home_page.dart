@@ -40,6 +40,8 @@ class _HomePageState extends State<HomePage> {
   bool _isRefreshing = false;
   Timer? _refreshDebouncer;
 
+  Timer? _roundInfoTimer;
+
   @override
   void initState() {
     super.initState();
@@ -50,22 +52,19 @@ class _HomePageState extends State<HomePage> {
   @override
   void dispose() {
     _refreshDebouncer?.cancel();
+    _roundInfoTimer?.cancel();
     super.dispose();
   }
 
   Future<void> _fetchInitialData() async {
     try {
+      // Fix 1: Only 2 parallel requests now — _fetchFactoryName() removed.
+      // Factory name is derived locally from the _fetchFactories() result.
       await Future.wait([
         _fetchFactories().timeout(
           const Duration(seconds: 10),
           onTimeout: () {
             debugPrint('Factories fetch timeout');
-          },
-        ),
-        _fetchFactoryName().timeout(
-          const Duration(seconds: 10),
-          onTimeout: () {
-            debugPrint('Factory name fetch timeout');
           },
         ),
         _refreshPatrolStatus().timeout(
@@ -78,9 +77,9 @@ class _HomePageState extends State<HomePage> {
     } catch (e) {
       debugPrint('Initial data fetch error: $e');
     }
-    
+
     _updateRoundInfo();
-    Timer.periodic(const Duration(minutes: 1), (timer) {
+    _roundInfoTimer = Timer.periodic(const Duration(minutes: 1), (timer) {
       if (mounted) _updateRoundInfo();
     });
   }
@@ -93,21 +92,39 @@ class _HomePageState extends State<HomePage> {
         setState(() {
           _factories = List<Map<String, dynamic>>.from(data);
         });
+        // Fix 1: Resolve factory name locally — no extra HTTP call
+        _resolveFactoryName();
       }
     } catch (e) {
       debugPrint("Error fetching factories: $e");
     }
   }
 
-  Future<void> _fetchFactoryName() async {
-    try {
-      if (_selectedFactoryCode == "ADMIN") {
-        if (mounted) {
-          setState(() => _factoryName = "Administrator");
-        }
-        return;
-      }
+  /// Derives the display name for the selected factory from the
+  /// already-fetched [_factories] list. Zero HTTP requests.
+  void _resolveFactoryName() {
+    if (_selectedFactoryCode == 'ADMIN') {
+      if (mounted) setState(() => _factoryName = 'Administrator');
+      return;
+    }
+    final match = _factories.firstWhere(
+      (f) => f['factory_code'] == _selectedFactoryCode,
+      orElse: () => {'factory_name': 'Unknown Factory'},
+    );
+    if (mounted) setState(() => _factoryName = match['factory_name']);
+  }
 
+  // Only called when factories list isn't loaded yet (edge case)
+  Future<void> _fetchFactoryName() async {
+    if (_factories.isNotEmpty) {
+      _resolveFactoryName();
+      return;
+    }
+    if (_selectedFactoryCode == 'ADMIN') {
+      if (mounted) setState(() => _factoryName = 'Administrator');
+      return;
+    }
+    try {
       final dataList = await D1Client
           .query('SELECT factory_name FROM factories WHERE factory_code = ? LIMIT 1', [_selectedFactoryCode]);
       final data = dataList.isNotEmpty ? dataList[0] : null;
@@ -115,9 +132,7 @@ class _HomePageState extends State<HomePage> {
         setState(() => _factoryName = data['factory_name']);
       }
     } catch (e) {
-      if (mounted) {
-        setState(() => _factoryName = "Unknown Factory");
-      }
+      if (mounted) setState(() => _factoryName = 'Unknown Factory');
     }
   }
 
@@ -279,9 +294,29 @@ class _HomePageState extends State<HomePage> {
       final currentRound = currentInfo['current'] as PatrolRound;
       final currentIndex = rounds.indexWhere((round) => round.time == currentRound.time);
 
-      final qrData = await D1Client
-          .query('SELECT qr_id FROM qr WHERE factory_code = ? AND status = ?', [_selectedFactoryCode, 'active']);
-      int totalQrCount = qrData.length;
+      // Fix 2: 2 queries total instead of 1 + N (one per round).
+      // Fetch QR count and ALL scan history for this factory in parallel.
+      final results = await Future.wait([
+        D1Client.query(
+          'SELECT qr_id FROM qr WHERE factory_code = ? AND status = ?',
+          [_selectedFactoryCode, 'active'],
+        ),
+        D1Client.query(
+          'SELECT qr_id, status, guard_name, round_slot FROM scanning_details WHERE factory_code = ?',
+          [_selectedFactoryCode],
+        ),
+      ]);
+
+      final qrData = results[0];
+      final allScans = results[1];
+      final int totalQrCount = qrData.length;
+
+      // Group all scans by round_slot in Dart — zero extra HTTP calls
+      final Map<String, List<dynamic>> scansBySlot = {};
+      for (var scan in allScans) {
+        final slot = scan['round_slot']?.toString() ?? '';
+        scansBySlot.putIfAbsent(slot, () => []).add(scan);
+      }
 
       if (totalQrCount == 0) {
         for (var round in rounds) {
@@ -296,26 +331,19 @@ class _HomePageState extends State<HomePage> {
         for (var i = 0; i < rounds.length; i++) {
           final round = rounds[i];
           final slotTime = round.time;
+          final slotKey = slotTime.toUtc().toIso8601String();
 
           String status;
-          List<dynamic> scannedData = [];
+          List<dynamic> scannedData = scansBySlot[slotKey] ?? [];
 
           if (i < currentIndex) {
-            scannedData = await D1Client
-                .query('SELECT qr_id, status, guard_name FROM scanning_details WHERE factory_code = ? AND round_slot = ?', [_selectedFactoryCode, slotTime.toUtc().toIso8601String()]);
-
             final seenQrIds = <String>{};
             for (var scan in scannedData) {
               if (_isSuccessStatus(scan['status'])) {
                 seenQrIds.add(scan['qr_id'].toString());
               }
             }
-            
-            if (seenQrIds.length >= totalQrCount) {
-              status = 'success';
-            } else {
-              status = 'missed';
-            }
+            status = seenQrIds.length >= totalQrCount ? 'success' : 'missed';
           } else if (i == currentIndex) {
             status = 'current';
           } else {
