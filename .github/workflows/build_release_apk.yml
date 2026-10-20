@@ -1,6 +1,12 @@
 name: Build & Release APK
 
 on:
+  push:
+    branches:
+      - version_test
+      - main
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       create_shorebird_release:
@@ -8,9 +14,9 @@ on:
         required: true
         type: boolean
         default: false
-  push:
-    tags:
-      - 'v*'
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -63,4 +69,19 @@ jobs:
         with:
           name: pentagon-patrol-release-apk
           path: build/app/outputs/flutter-apk/app-release.apk
-          retention-days: 14
+          retention-days: 30
+
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/v') || github.ref_name == 'version_test' || github.ref_name == 'main'
+        with:
+          files: build/app/outputs/flutter-apk/app-release.apk
+          tag_name: latest-apk
+          name: "Pentagon Patrol - Guard Release APK"
+          body: |
+            Official Release APK for Pentagon Patrol Security Guards.
+            - Built with Shorebird OTA Auto-Updates enabled.
+            - Compatible with Android 13 Lite, Go Edition, and Android 7.0+.
+            - Offline scanning and auto-sync support.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
