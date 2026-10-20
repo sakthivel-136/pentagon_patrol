@@ -148,7 +148,13 @@ class OfflineSyncManager {
       }
     }
 
-    await prefs.setString(_kOfflineQueueKey, jsonEncode(remainingQueue));
+    // Storage cleanup: If all items synced successfully, delete the key completely from phone storage
+    if (remainingQueue.isEmpty) {
+      await prefs.remove(_kOfflineQueueKey);
+      debugPrint('Offline queue completely emptied and deleted from storage.');
+    } else {
+      await prefs.setString(_kOfflineQueueKey, jsonEncode(remainingQueue));
+    }
     return successCount;
   }
 }
