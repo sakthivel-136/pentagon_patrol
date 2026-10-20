@@ -35,6 +35,9 @@ jobs:
         with:
           cache: true
 
+      - name: Configure Flutter JDK for CI
+        run: flutter config --jdk-dir "$JAVA_HOME"
+
       - name: Push Shorebird Patch (OTA)
         env:
           SHOREBIRD_TOKEN: ${{ secrets.SHOREBIRD_TOKEN }}
