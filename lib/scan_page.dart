@@ -12,6 +12,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 
 import 'round_utils.dart';
+import 'offline_sync.dart';
 
 class ScanningPage extends StatefulWidget {
   final String guardName;
@@ -57,6 +58,7 @@ class _ScanningPageState extends State<ScanningPage> {
   bool _showingCompleteDialog = false;
 
   Timer? _syncTimer;
+  StreamSubscription<List<ConnectivityResult>>? _connectivitySub;
 
   DateTime? _lastScanTime; // cooldown
 
@@ -77,10 +79,21 @@ class _ScanningPageState extends State<ScanningPage> {
     });
     _fetchCheckpoints();
 
+    // Check for offline scans that need syncing on startup
+    _syncOfflineScans();
+
+    // Listen to network changes and auto-sync pending offline scans when reconnected
+    _connectivitySub = Connectivity().onConnectivityChanged.listen((results) {
+      if (!results.contains(ConnectivityResult.none)) {
+        _syncOfflineScans();
+      }
+    });
+
     // Fix 4: Increased from 20s → 60s. Scans still update immediately
     // after each save via _fetchCheckpoints() — guards won't notice.
     _syncTimer = Timer.periodic(const Duration(seconds: 60), (_) {
       _fetchCheckpoints();
+      _syncOfflineScans();
     });
   }
 
@@ -139,28 +152,47 @@ class _ScanningPageState extends State<ScanningPage> {
       _currentWindowEnd = roundInfo['scanWindowClose'] as DateTime;
       _scanAvailable = roundInfo['isActive'] as bool;
 
-      // Fix 3 + Fix 5: Fetch QR list only once per session (it never changes).
-      // Only re-fetch scanning_details on every sync tick (it does change).
+      // Fix 3 + Fix 5 + Offline Cache:
+      // Fetch QR list only once per session (it never changes).
+      // If offline or query fails, load from persistent local cache.
       if (_cachedQrData.isEmpty) {
-        _cachedQrData = List<Map<String, dynamic>>.from(
-          await D1Client.query(
-            'SELECT qr_id, qr_name, waiting_time FROM qr WHERE factory_code = ? AND status = ?',
-            [widget.factoryCode, 'active'],
-          ),
-        );
-      }
-
-      final scanData = await D1Client.query(
-        'SELECT qr_id, status FROM scanning_details WHERE factory_code = ? AND round_slot = ?',
-        [widget.factoryCode, _currentRound.toUtc().toIso8601String()],
-      );
-
-      final Set<String> success = {};
-      for (var e in scanData) {
-        if (e['status'] == 'SUCCESS') {
-          success.add(_norm(e['qr_id']));
+        try {
+          _cachedQrData = List<Map<String, dynamic>>.from(
+            await D1Client.query(
+              'SELECT qr_id, qr_name, waiting_time FROM qr WHERE factory_code = ? AND status = ?',
+              [widget.factoryCode, 'active'],
+            ),
+          );
+          if (_cachedQrData.isNotEmpty) {
+            await OfflineSyncManager.cacheCheckpoints(widget.factoryCode, _cachedQrData);
+          }
+        } catch (e) {
+          debugPrint("Failed to fetch online checkpoints, using local cache: $e");
+          _cachedQrData = await OfflineSyncManager.getCachedCheckpoints(widget.factoryCode);
         }
       }
+
+      final Set<String> success = {};
+      try {
+        final scanData = await D1Client.query(
+          'SELECT qr_id, status FROM scanning_details WHERE factory_code = ? AND round_slot = ?',
+          [widget.factoryCode, _currentRound.toUtc().toIso8601String()],
+        );
+        for (var e in scanData) {
+          if (e['status'] == 'SUCCESS') {
+            success.add(_norm(e['qr_id']));
+          }
+        }
+      } catch (e) {
+        debugPrint("Failed to fetch scanData (possibly offline): $e");
+      }
+
+      // Merge locally queued offline scans for this round slot so they appear completed immediately
+      final offlineScanned = await OfflineSyncManager.getOfflineScannedQrIds(
+        widget.factoryCode,
+        _currentRound.toUtc().toIso8601String(),
+      );
+      success.addAll(offlineScanned);
 
       if (!mounted) return;
 
@@ -189,12 +221,27 @@ class _ScanningPageState extends State<ScanningPage> {
       _checkAutoLogout();
     } catch (e) {
       debugPrint("Fetch error: $e");
+      if (mounted) setState(() => _loading = false);
     }
   }
 
   // ================= DB CHECK =================
 
   Future<bool> _existsSuccess(String qr) async {
+    final normQr = _norm(qr);
+    // Check local offline queue first
+    final offlineScanned = await OfflineSyncManager.getOfflineScannedQrIds(
+      widget.factoryCode,
+      _currentRound.toUtc().toIso8601String(),
+    );
+    if (offlineScanned.contains(normQr)) {
+      return true;
+    }
+
+    if (!await _isOnline()) {
+      return false;
+    }
+
     try {
       final resList = await D1Client
           .query('SELECT id FROM scanning_details WHERE factory_code = ? AND qr_id = ? AND round_slot = ? AND status = ? LIMIT 1',
@@ -427,46 +474,78 @@ class _ScanningPageState extends State<ScanningPage> {
     setState(() => _isProcessing = true);
 
     try {
-      if (!await _isOnline()) {
-        _msg('NO INTERNET', Colors.red);
-        return;
-      }
-
       var pos = await _getCurrentPosition();
-      if (pos == null) {
-        _msg('CANNOT GET LOCATION - SCAN FAILED', Colors.red);
+      final scanPayload = {
+        'guard_name': widget.guardName,
+        'qr_id': p['qr_id'].toString(),
+        'qr_name': p['qr_name'] ?? '',
+        'lat': pos?.latitude ?? 0.0,
+        'log': pos?.longitude ?? 0.0,
+        'factory_code': widget.factoryCode,
+        'scan_time': DateTime.now().toUtc().toIso8601String(),
+        'round_slot': _currentRound.toUtc().toIso8601String(),
+        'status': 'SUCCESS'
+      };
+
+      // OFFLINE SUPPORT: If no network is active, save to persistent cache queue
+      if (!await _isOnline()) {
+        await OfflineSyncManager.queueOfflineScan(scanPayload);
+        _activeQrId = null;
+        _msg('SAVED OFFLINE (WILL SYNC WHEN CONNECTED)', Colors.orange);
+        if (mounted) {
+          setState(() {
+            p['completed'] = true;
+            p['waiting_done'] = false;
+            p['scanned_once'] = false;
+          });
+        }
+        _checkAutoLogout();
         return;
       }
 
-      await D1Client.query(
-        'INSERT INTO scanning_details (guard_name, qr_id, qr_name, lat, log, factory_code, scan_time, round_slot, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        [
-          widget.guardName,
-          p['qr_id'].toString(),
-          p['qr_name'],
-          pos.latitude,
-          pos.longitude,
-          widget.factoryCode,
-          DateTime.now().toUtc().toIso8601String(),
-          _currentRound.toUtc().toIso8601String(),
-          'SUCCESS'
-        ],
-      );
+      // ONLINE: Attempt immediate upload to Cloudflare D1
+      try {
+        await D1Client.query(
+          'INSERT INTO scanning_details (guard_name, qr_id, qr_name, lat, log, factory_code, scan_time, round_slot, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          [
+            scanPayload['guard_name'],
+            scanPayload['qr_id'],
+            scanPayload['qr_name'],
+            scanPayload['lat'],
+            scanPayload['log'],
+            scanPayload['factory_code'],
+            scanPayload['scan_time'],
+            scanPayload['round_slot'],
+            scanPayload['status']
+          ],
+        );
 
-      _activeQrId = null;
-      _msg('SCAN UPLOADED', Colors.green);
+        _activeQrId = null;
+        _msg('SCAN UPLOADED', Colors.green);
 
-      _fetchCheckpoints();
-      _checkAutoLogout();
-    } catch (e) {
-      final msg = e.toString();
-
-      if (msg.contains('23505') || msg.contains('UNIQUE constraint failed')) {
-        _msg("ALREADY SCANNED", Colors.green);
         _fetchCheckpoints();
-      } else {
-        debugPrint("Save error: $e");
-        _msg("UPLOAD FAILED", Colors.red);
+        _checkAutoLogout();
+      } catch (e) {
+        final msg = e.toString();
+
+        if (msg.contains('23505') || msg.contains('UNIQUE constraint failed')) {
+          _msg("ALREADY SCANNED", Colors.green);
+          _fetchCheckpoints();
+        } else {
+          // Network dropped mid-request or server unreachable: fallback to offline queue
+          debugPrint("Save error, fallback to offline queue: $e");
+          await OfflineSyncManager.queueOfflineScan(scanPayload);
+          _activeQrId = null;
+          _msg('SAVED OFFLINE (NETWORK GLITCH - WILL SYNC)', Colors.orange);
+          if (mounted) {
+            setState(() {
+              p['completed'] = true;
+              p['waiting_done'] = false;
+              p['scanned_once'] = false;
+            });
+          }
+          _checkAutoLogout();
+        }
       }
     } finally {
       if (mounted) {
@@ -474,6 +553,21 @@ class _ScanningPageState extends State<ScanningPage> {
       } else {
         _isProcessing = false;
       }
+    }
+  }
+
+  // ================= OFFLINE AUTO-SYNC =================
+
+  Future<void> _syncOfflineScans() async {
+    try {
+      if (!await _isOnline()) return;
+      final synced = await OfflineSyncManager.syncPendingScans();
+      if (synced > 0) {
+        _msg('$synced OFFLINE SCANS SYNCED TO DATABASE', Colors.green);
+        _fetchCheckpoints();
+      }
+    } catch (e) {
+      debugPrint("Error in _syncOfflineScans: $e");
     }
   }
 
@@ -823,6 +917,7 @@ class _ScanningPageState extends State<ScanningPage> {
 
   @override
   void dispose() {
+    _connectivitySub?.cancel();
     _syncTimer?.cancel();
     scannerController.dispose();
     super.dispose();
