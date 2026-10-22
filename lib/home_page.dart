@@ -275,10 +275,28 @@ class _HomePageState extends State<HomePage> {
     try {
       final now = DateTime.now();
       List<Map<String, dynamic>> slots = [];
-      final rounds = buildPatrolRounds(now);
-      final currentInfo = getCurrentPatrolRound(now);
+
+      // Use factory-specific rounds from D1/cache
+      final dbRounds = _factoryRounds.isNotEmpty
+          ? _factoryRounds
+          : await loadRoundsForFactory(_selectedFactoryCode);
+
+      final currentInfo = getCurrentPatrolRound(now, dbRounds: dbRounds);
       final currentRound = currentInfo['current'] as PatrolRound;
-      final currentIndex = rounds.indexWhere((round) => round.time == currentRound.time);
+
+      final List<PatrolRound> rounds = [];
+      for (final r in dbRounds) {
+        final interval = resolveWindowInterval(now, r.startTime, r.endTime);
+        rounds.add(PatrolRound(
+          interval.start,
+          '${formatTime12h(r.startTime)} - ${formatTime12h(r.endTime)}',
+          r.roundNumber,
+          scanWindowOpen: resolveWindowInterval(now, r.scanStartTime, r.scanEndTime).start,
+          scanWindowClose: resolveWindowInterval(now, r.scanStartTime, r.scanEndTime).end,
+        ));
+      }
+      rounds.sort((a, b) => a.round.compareTo(b.round));
+      final currentIndex = rounds.indexWhere((round) => round.round == currentRound.round);
 
       // Fix 2: 2 queries total instead of 1 + N (one per round).
       // Fetch QR count and ALL scan history for this factory in parallel.
@@ -517,88 +535,166 @@ class _HomePageState extends State<HomePage> {
         showDialog(
           context: context,
           builder: (BuildContext context) {
-            return AlertDialog(
-              title: Text("Patrol Rounds Report - $_factoryName"),
-              content: SizedBox(
-                width: double.maxFinite,
-                height: 400,
-                child: _isLoadingStatus
-                    ? const Center(child: CircularProgressIndicator())
-                    : _roundSlots.isEmpty
-                        ? const Center(child: Text("No rounds available"))
-                        : ListView.builder(
-                            itemCount: _roundSlots.length,
-                            itemBuilder: (context, index) {
-                              final slot = _roundSlots[index];
-                              final status = slot['status'];
-                              Color statusColor;
-                              String statusText;
-                              switch (status) {
-                                case 'success':
-                                  statusColor = Colors.green;
-                                  statusText = 'Success';
-                                  break;
-                                case 'missed':
-                                  statusColor = Colors.red;
-                                  statusText = 'Missed';
-                                  break;
-                                case 'current':
-                                  statusColor = Colors.blue;
-                                  statusText = 'In Progress';
-                                  break;
-                                case 'no_qr':
-                                  statusColor = Colors.grey;
-                                  statusText = 'No QR Available';
-                                  break;
-                                default:
-                                  statusColor = Colors.grey;
-                                  statusText = 'No Data';
-                              }
-                              return Card(
-                                margin: const EdgeInsets.symmetric(vertical: 4),
-                                child: ListTile(
-                                  title: Text(slot['round']),
-                                  subtitle: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                    children: [
-                                      Text(slot['label']),
-                                      const SizedBox(height: 2),
-                                      Text(
-                                        "Guard: ${slot['guard_name'] ?? 'Unknown'}",
-                                        style: const TextStyle(
-                                            fontSize: 12, color: Colors.black54),
-                                      ),
-                                    ],
-                                  ),
-                                  trailing: Container(
-                                    padding: const EdgeInsets.symmetric(
-                                        horizontal: 8, vertical: 4),
-                                    decoration: BoxDecoration(
-                                      color: statusColor.withValues(alpha: 0.1),
-                                      borderRadius: BorderRadius.circular(12),
-                                      border: Border.all(color: statusColor),
-                                    ),
-                                    child: Text(
-                                      statusText,
-                                      style: TextStyle(
-                                        fontSize: 12,
-                                        fontWeight: FontWeight.bold,
-                                        color: statusColor,
-                                      ),
-                                    ),
-                                  ),
-                                  onTap: () => _showRoundDetails(slot),
-                                ),
-                              );
-                            },
+            return StatefulBuilder(
+              builder: (context, setDialogState) {
+                return AlertDialog(
+                  title: Row(
+                    children: [
+                      const Icon(Icons.assessment, color: Color(0xFF005C97)),
+                      const SizedBox(width: 8),
+                      const Expanded(
+                        child: Text(
+                          "Patrol Rounds Report",
+                          style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                    ],
+                  ),
+                  content: SizedBox(
+                    width: double.maxFinite,
+                    height: 480,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        // Factory Dropdown selector inside the dialog
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: Colors.grey.shade100,
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(color: Colors.grey.shade300),
                           ),
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.of(context).pop(),
-                  child: const Text("Close"),
-                ),
-              ],
+                          child: DropdownButtonHideUnderline(
+                            child: DropdownButton<String>(
+                              isExpanded: true,
+                              value: _factories.any((f) => f['factory_code'] == _selectedFactoryCode)
+                                  ? _selectedFactoryCode
+                                  : (_factories.isNotEmpty ? _factories.first['factory_code'] : null),
+                              hint: const Text("Select Factory"),
+                              items: _factories.map((f) {
+                                return DropdownMenuItem<String>(
+                                  value: f['factory_code'],
+                                  child: Text(
+                                    "${f['factory_code']} – ${f['factory_name']}",
+                                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                );
+                              }).toList(),
+                              onChanged: (newCode) async {
+                                if (newCode == null || newCode == _selectedFactoryCode) return;
+                                setState(() {
+                                  _selectedFactoryCode = newCode;
+                                  _resolveFactoryName();
+                                  _isLoadingStatus = true;
+                                });
+                                setDialogState(() {});
+                                _factoryRounds = await loadRoundsForFactory(newCode);
+                                await _generateRoundSlots();
+                                if (mounted) {
+                                  setDialogState(() {});
+                                  setState(() {});
+                                }
+                              },
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 4),
+                          child: Text(
+                            "Showing ${_roundSlots.length} rounds for $_factoryName",
+                            style: TextStyle(
+                              fontSize: 11.5,
+                              color: Colors.grey.shade600,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Expanded(
+                          child: _isLoadingStatus
+                              ? const Center(child: CircularProgressIndicator())
+                              : _roundSlots.isEmpty
+                                  ? const Center(child: Text("No rounds configured for this factory"))
+                                  : ListView.builder(
+                                      itemCount: _roundSlots.length,
+                                      itemBuilder: (context, index) {
+                                        final slot = _roundSlots[index];
+                                        final status = slot['status'];
+                                        Color statusColor;
+                                        String statusText;
+                                        switch (status) {
+                                          case 'success':
+                                            statusColor = Colors.green;
+                                            statusText = 'Success';
+                                            break;
+                                          case 'missed':
+                                            statusColor = Colors.red;
+                                            statusText = 'Missed';
+                                            break;
+                                          case 'current':
+                                            statusColor = Colors.blue;
+                                            statusText = 'In Progress';
+                                            break;
+                                          case 'no_qr':
+                                            statusColor = Colors.grey;
+                                            statusText = 'No QR Available';
+                                            break;
+                                          default:
+                                            statusColor = Colors.grey;
+                                            statusText = 'No Data';
+                                        }
+                                        return Card(
+                                          margin: const EdgeInsets.symmetric(vertical: 4),
+                                          child: ListTile(
+                                            title: Text(slot['round']),
+                                            subtitle: Column(
+                                              crossAxisAlignment: CrossAxisAlignment.start,
+                                              children: [
+                                                Text(slot['label']),
+                                                const SizedBox(height: 2),
+                                                Text(
+                                                  "Guard: ${slot['guard_name'] ?? 'Unknown'}",
+                                                  style: const TextStyle(
+                                                      fontSize: 12, color: Colors.black54),
+                                                ),
+                                              ],
+                                            ),
+                                            trailing: Container(
+                                              padding: const EdgeInsets.symmetric(
+                                                  horizontal: 8, vertical: 4),
+                                              decoration: BoxDecoration(
+                                                color: statusColor.withValues(alpha: 0.1),
+                                                borderRadius: BorderRadius.circular(12),
+                                                border: Border.all(color: statusColor),
+                                              ),
+                                              child: Text(
+                                                statusText,
+                                                style: TextStyle(
+                                                  fontSize: 12,
+                                                  fontWeight: FontWeight.bold,
+                                                  color: statusColor,
+                                                ),
+                                              ),
+                                            ),
+                                            onTap: () => _showRoundDetails(slot),
+                                          ),
+                                        );
+                                      },
+                                    ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  actions: [
+                    TextButton(
+                      onPressed: () => Navigator.of(context).pop(),
+                      child: const Text("Close"),
+                    ),
+                  ],
+                );
+              },
             );
           },
         );
