@@ -42,4 +42,4 @@ jobs:
         env:
           SHOREBIRD_TOKEN: ${{ secrets.SHOREBIRD_TOKEN }}
         run: |
-          shorebird patch android --verbose
+          shorebird patch android --allow-asset-diffs --verbose
