@@ -91,6 +91,17 @@ jobs:
           path: build/app/outputs/flutter-apk/app-release.apk
           retention-days: 30
 
+      - name: Refresh latest-apk Tag & Clean Previous Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Delete existing release so GitHub creates a fresh one with current timestamp & source code zip
+          gh release delete latest-apk --yes || true
+          git tag -d latest-apk 2>/dev/null || true
+          git push origin :refs/tags/latest-apk 2>/dev/null || true
+          git tag -fa latest-apk -m "Release for commit ${{ github.sha }}"
+          git push origin latest-apk --force
+
       - name: Publish to GitHub Releases
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/v') || github.ref_name == 'version_test' || github.ref_name == 'main'
@@ -99,6 +110,7 @@ jobs:
             build/app/outputs/flutter-apk/app-release.apk
             build/app/outputs/flutter-apk/version.json
           tag_name: latest-apk
+          target_commitish: ${{ github.sha }}
           name: "Pentagon Patrol - Guard Release APK"
           body: |
             Official Release APK for Pentagon Patrol Security Guards.
