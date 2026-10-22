@@ -95,6 +95,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           # Delete existing release so GitHub creates a fresh one with current timestamp & source code zip
           gh release delete latest-apk --yes || true
           git tag -d latest-apk 2>/dev/null || true
