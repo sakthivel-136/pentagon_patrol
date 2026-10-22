@@ -1,18 +1,13 @@
 // lib/round_utils.dart
-// Database-driven & offline-first utilities for Patrol Rounds & Scan Window Engine.
-// Supports multi-factory dynamic rounds (DbPatrolRound, RoundStatus)
-// and legacy compatibility helpers (PatrolRound, buildPatrolRounds, getCurrentPatrolRound).
+// 100% Database-Driven Patrol Rounds & Scan Window Engine.
+// Takes all round details strictly from the Cloudflare D1 database.
+// NO hardcoded / fixed fallback rounds. If unconfigured, leaves empty.
 
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
-import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'models/patrol_round.dart';
 import 'd1_client.dart';
-
-// ==============================================================================
-// LEGACY COMPATIBILITY MODELS & ADAPTERS
-// ==============================================================================
 
 class PatrolRound {
   final DateTime time;
@@ -32,7 +27,7 @@ class PatrolRound {
 
 String _twoDigit(int n) => n.toString().padLeft(2, '0');
 
-// Converts a 24h "HH:mm" time string into a 12h "hh:mm a" string
+/// Converts a 24h "HH:mm" time string into a 12h "hh:mm a" string
 String formatTime12h(String hhmm) {
   try {
     final parts = hhmm.split(':');
@@ -47,7 +42,7 @@ String formatTime12h(String hhmm) {
 }
 
 // ==============================================================================
-// TIME INTERVAL RESOLVER (HANDLES MIDNIGHT CROSSOVER)
+// TIME INTERVAL RESOLVER (HANDLES OVERNIGHT / MIDNIGHT CROSSOVER)
 // ==============================================================================
 
 class WindowInterval {
@@ -102,47 +97,14 @@ WindowInterval resolveWindowInterval(DateTime now, String startHhmm, String endH
 }
 
 // ==============================================================================
-// DATABASE-DRIVEN PATROL ROUNDS & FACTORY CACHING
+// STRICT DATABASE-DRIVEN PATROL ROUNDS LOADER & CACHE
 // ==============================================================================
 
 String _cacheKey(String factoryCode) => 'pentagon_cached_rounds_$factoryCode';
 
-/// Generates standard 33 fallback rounds for a factory if database/cache is completely empty.
-List<DbPatrolRound> getFallbackDbRounds(String factoryCode) {
-  final List<DbPatrolRound> list = [];
-  // 33 rounds spaced evenly across 24h
-  for (int i = 0; i < 33; i++) {
-    final roundNum = i + 1;
-    final totalMinutes = ((roundNum - 1) * 45) % (24 * 60);
-    final sH = totalMinutes ~/ 60;
-    final sM = totalMinutes % 60;
-    final endMinutes = (totalMinutes + 45) % (24 * 60);
-    final eH = endMinutes ~/ 60;
-    final eM = endMinutes % 60;
-
-    final scanStartMinutes = (totalMinutes - 5 + (24 * 60)) % (24 * 60);
-    final ssH = scanStartMinutes ~/ 60;
-    final ssM = scanStartMinutes % 60;
-
-    final scanEndMinutes = (totalMinutes + 20) % (24 * 60);
-    final seH = scanEndMinutes ~/ 60;
-    final seM = scanEndMinutes % 60;
-
-    list.add(DbPatrolRound(
-      id: 'rnd-$factoryCode-$roundNum',
-      factoryCode: factoryCode,
-      roundNumber: roundNum,
-      startTime: '${_twoDigit(sH)}:${_twoDigit(sM)}',
-      endTime: '${_twoDigit(eH)}:${_twoDigit(eM)}',
-      scanStartTime: '${_twoDigit(ssH)}:${_twoDigit(ssM)}',
-      scanEndTime: '${_twoDigit(seH)}:${_twoDigit(seM)}',
-    ));
-  }
-  return list;
-}
-
-/// Loads rounds for a specific factory.
-/// Attempts to query Cloudflare D1 first; falls back to local SharedPreferences cache.
+/// Loads rounds for a specific factory strictly from the Cloudflare D1 database.
+/// If network is offline, loads from local cached snapshot.
+/// If no rounds are configured in database, returns [] (EMPTY). ZERO synthetic fallbacks.
 Future<List<DbPatrolRound>> loadRoundsForFactory(String factoryCode) async {
   final resolvedFactory = (factoryCode.isEmpty || factoryCode == 'ADMIN') ? 'F001' : factoryCode;
 
@@ -157,7 +119,8 @@ Future<List<DbPatrolRound>> loadRoundsForFactory(String factoryCode) async {
     if (rows.isNotEmpty) {
       final rounds = rows
           .map((r) => DbPatrolRound.fromJson(Map<String, dynamic>.from(r)))
-          .toList();
+          .toList()
+        ..sort((a, b) => a.roundNumber.compareTo(b.roundNumber));
       // Update local cache
       await saveCachedRounds(resolvedFactory, rounds);
       debugPrint("Loaded ${rounds.length} rounds from D1 for factory $resolvedFactory");
@@ -167,15 +130,15 @@ Future<List<DbPatrolRound>> loadRoundsForFactory(String factoryCode) async {
     debugPrint("Failed to fetch rounds from D1 for $resolvedFactory, falling back to cache: $e");
   }
 
-  // 2. Fallback to cached rounds
+  // 2. Fallback to cached rounds snapshot
   final cached = await getCachedRounds(resolvedFactory);
   if (cached.isNotEmpty) {
     debugPrint("Loaded ${cached.length} cached rounds for factory $resolvedFactory");
     return cached;
   }
 
-  // 3. Database is the single source of truth - no synthetic hardcoded rounds
-  debugPrint("No rounds configured in D1 or cache for factory $resolvedFactory");
+  // 3. No rounds configured in database: return EMPTY list
+  debugPrint("No rounds configured in database for factory $resolvedFactory");
   return <DbPatrolRound>[];
 }
 
@@ -238,14 +201,14 @@ class FactoryRoundStatus {
   });
 }
 
-/// Analyzes [now] against the configured [rounds] for a factory to determine:
+/// Analyzes [now] against the configured database [rounds] for a factory to determine:
 /// - If a scan window is currently open (guard login allowed)
-/// - The active round and how much time remains
-/// - The next scheduled scan window and countdown until it opens
+/// - The active round and exact scan window from database scan_start_time / scan_end_time
+/// - The next scheduled scan window
 FactoryRoundStatus getFactoryRoundStatus(DateTime now, List<DbPatrolRound> rounds) {
   if (rounds.isEmpty) {
     return FactoryRoundStatus(
-      isScanWindowActive: true, // Default open if unconfigured
+      isScanWindowActive: true, // Allow login if factory has no rounds configured
       activeRound: null,
       activeWindowStart: null,
       activeWindowEnd: null,
@@ -267,7 +230,7 @@ FactoryRoundStatus getFactoryRoundStatus(DateTime now, List<DbPatrolRound> round
   DateTime? nextWindowStart;
   Duration? untilNext;
 
-  // 1. Check if now falls inside ANY round's scan window
+  // 1. Check if now falls inside ANY round's database-configured scan window
   for (final r in rounds) {
     final interval = resolveWindowInterval(now, r.scanStartTime, r.scanEndTime);
     if (!now.isBefore(interval.start) && now.isBefore(interval.end)) {
@@ -309,16 +272,15 @@ FactoryRoundStatus getFactoryRoundStatus(DateTime now, List<DbPatrolRound> round
   String label = '';
   String scanWindow = '';
   if (activeRound != null && activeWindowStart != null && activeWindowEnd != null) {
-    final roundInterval = resolveWindowInterval(now, activeRound.startTime, activeRound.endTime);
-    final start12 = DateFormat('hh:mm a').format(roundInterval.start);
-    final end12 = DateFormat('hh:mm a').format(roundInterval.end);
+    final start12 = formatTime12h(activeRound.startTime);
+    final end12 = formatTime12h(activeRound.endTime);
     label = 'Round ${_twoDigit(activeRound.roundNumber)} ($start12 – $end12)';
 
-    final scanStart12 = DateFormat('hh:mm a').format(activeWindowStart);
-    final scanEnd12 = DateFormat('hh:mm a').format(activeWindowEnd);
+    final scanStart12 = formatTime12h(activeRound.scanStartTime);
+    final scanEnd12 = formatTime12h(activeRound.scanEndTime);
     scanWindow = '$scanStart12 – $scanEnd12';
   } else if (nextRound != null) {
-    label = 'Next: Round ${_twoDigit(nextRound.roundNumber)}';
+    label = 'Next: Round ${_twoDigit(nextRound.roundNumber)} (${formatTime12h(nextRound.startTime)})';
     scanWindow = 'Opens at ${formatTime12h(nextRound.scanStartTime)}';
   }
 
@@ -337,160 +299,60 @@ FactoryRoundStatus getFactoryRoundStatus(DateTime now, List<DbPatrolRound> round
 }
 
 // ==============================================================================
-// LEGACY COMPATIBILITY HELPERS (Used by existing UI callers)
+// CURRENT PATROL ROUND LOOKUP (DATABASE-ONLY)
 // ==============================================================================
 
-List<DateTime> _buildDaySlots(DateTime date) {
-  final base = DateTime(date.year, date.month, date.day);
-  return List<DateTime>.generate(
-    16,
-    (index) => DateTime(base.year, base.month, base.day, 6 + index),
-  );
-}
-
-List<DateTime> _buildNightSlots(DateTime date) {
-  final base = DateTime(date.year, date.month, date.day);
-  return [
-    DateTime(base.year, base.month, base.day, 22, 0),
-    DateTime(base.year, base.month, base.day, 22, 30),
-    DateTime(base.year, base.month, base.day, 23, 0),
-    DateTime(base.year, base.month, base.day, 23, 30),
-  ];
-}
-
-List<DateTime> _buildEarlyMorningSlots(DateTime date) {
-  final base = DateTime(date.year, date.month, date.day);
-  return List<DateTime>.generate(
-    12,
-    (index) => DateTime(base.year, base.month, base.day, index ~/ 2, (index % 2) * 30),
-  );
-}
-
-List<PatrolRound> buildPatrolRounds(DateTime now) {
-  final localDay = DateTime(now.year, now.month, now.day);
-  final cycleStart = now.hour < 6 ? localDay.subtract(const Duration(days: 1)) : localDay;
-  final cycleEndDay = cycleStart.add(const Duration(days: 1));
-
-  final slots = <DateTime>[];
-  slots.addAll(_buildDaySlots(cycleStart));
-  slots.addAll(_buildNightSlots(cycleStart));
-  slots.addAll(_buildEarlyMorningSlots(cycleEndDay));
-  slots.sort();
-
-  return List<PatrolRound>.generate(
-    slots.length,
-    (index) => PatrolRound(
-      slots[index],
-      DateFormat('h:mm a').format(slots[index]),
-      index + 1,
-      scanWindowOpen: slots[index].subtract(const Duration(minutes: 5)),
-      scanWindowClose: slots[index].add(const Duration(minutes: 15)),
-    ),
-  );
-}
-
-DateTime getScanWindowStart(DateTime roundStart) {
-  return roundStart.subtract(const Duration(minutes: 5));
-}
-
-DateTime getScanWindowEnd(DateTime roundStart) {
-  return roundStart.add(const Duration(minutes: 15));
-}
-
-bool isWithinPatrolScanWindow(DateTime now, DateTime roundStart) {
-  final start = getScanWindowStart(roundStart);
-  final end = getScanWindowEnd(roundStart);
-  return !now.isBefore(start) && now.isBefore(end);
-}
-
 Map<String, dynamic> getCurrentPatrolRound(DateTime now, {List<DbPatrolRound>? dbRounds}) {
-  if (dbRounds != null && dbRounds.isNotEmpty) {
-    final status = getFactoryRoundStatus(now, dbRounds);
-    final active = status.activeRound ?? dbRounds.first;
-    final next = status.nextRound ?? (dbRounds.length > 1 ? dbRounds[1] : dbRounds.first);
-
-    final activeWindow = status.activeWindowStart != null && status.activeWindowEnd != null
-        ? WindowInterval(status.activeWindowStart!, status.activeWindowEnd!)
-        : resolveWindowInterval(now, active.scanStartTime, active.scanEndTime);
-
-    final nextWindow = resolveWindowInterval(now, next.scanStartTime, next.scanEndTime);
-    final roundInterval = resolveWindowInterval(now, active.startTime, active.endTime);
-
-    final currentPatrol = PatrolRound(
-      roundInterval.start,
-      'Round ${_twoDigit(active.roundNumber)} (${formatTime12h(active.startTime)})',
-      active.roundNumber,
-      scanWindowOpen: activeWindow.start,
-      scanWindowClose: activeWindow.end,
-    );
-
-    final nextPatrol = PatrolRound(
-      nextWindow.start,
-      'Round ${_twoDigit(next.roundNumber)} (${formatTime12h(next.startTime)})',
-      next.roundNumber,
-      scanWindowOpen: nextWindow.start,
-      scanWindowClose: nextWindow.end,
-    );
-
+  if (dbRounds == null || dbRounds.isEmpty) {
     return {
-      'current': currentPatrol,
-      'next': nextPatrol,
-      'currentRoundTime': roundInterval.start,
-      'nextRoundTime': nextWindow.start,
-      'currentRoundLabel': currentPatrol.label,
-      'currentRoundNumber': currentPatrol.round,
-      'scanWindowOpen': activeWindow.start,
-      'scanWindowClose': activeWindow.end,
-      'isActive': status.isScanWindowActive,
+      'current': null,
+      'next': null,
+      'currentRoundTime': now,
+      'nextRoundTime': now,
+      'currentRoundLabel': 'No rounds configured',
+      'currentRoundNumber': 0,
+      'scanWindowOpen': null,
+      'scanWindowClose': null,
+      'isActive': false,
     };
   }
 
-  // Legacy fallback
-  final rounds = buildPatrolRounds(now);
-  PatrolRound current = rounds.first;
-  int currentIndex = 0;
-  bool foundActive = false;
+  final status = getFactoryRoundStatus(now, dbRounds);
+  final active = status.activeRound ?? dbRounds.first;
+  final next = status.nextRound ?? (dbRounds.length > 1 ? dbRounds[1] : dbRounds.first);
 
-  for (var i = 0; i < rounds.length; i++) {
-    final start = getScanWindowStart(rounds[i].time);
-    final end = getScanWindowEnd(rounds[i].time);
-    if (!now.isBefore(start) && now.isBefore(end)) {
-      current = rounds[i];
-      currentIndex = i;
-      foundActive = true;
-      break;
-    }
-  }
+  final activeWindow = status.activeWindowStart != null && status.activeWindowEnd != null
+      ? WindowInterval(status.activeWindowStart!, status.activeWindowEnd!)
+      : resolveWindowInterval(now, active.scanStartTime, active.scanEndTime);
 
-  if (!foundActive) {
-    for (var i = 0; i < rounds.length; i++) {
-      final start = getScanWindowStart(rounds[i].time);
-      if (now.isBefore(start)) {
-        current = rounds[i];
-        currentIndex = i;
-        break;
-      }
-      current = rounds[i];
-      currentIndex = i;
-    }
-  }
+  final nextWindow = resolveWindowInterval(now, next.scanStartTime, next.scanEndTime);
+  final roundInterval = resolveWindowInterval(now, active.startTime, active.endTime);
 
-  final next = currentIndex < rounds.length - 1 ? rounds[currentIndex + 1] : rounds.first;
+  final currentPatrol = PatrolRound(
+    roundInterval.start,
+    'Round ${_twoDigit(active.roundNumber)} (${formatTime12h(active.startTime)} - ${formatTime12h(active.endTime)})',
+    active.roundNumber,
+    scanWindowOpen: activeWindow.start,
+    scanWindowClose: activeWindow.end,
+  );
+
+  final nextPatrol = PatrolRound(
+    nextWindow.start,
+    'Round ${_twoDigit(next.roundNumber)} (${formatTime12h(next.startTime)} - ${formatTime12h(next.endTime)})',
+    next.roundNumber,
+    scanWindowOpen: nextWindow.start,
+    scanWindowClose: nextWindow.end,
+  );
 
   return {
-    'current': current,
-    'next': next,
-    'currentRoundTime': current.time,
-    'nextRoundTime': next.time,
-    'currentRoundLabel': current.label,
-    'currentRoundNumber': current.round,
-    'scanWindowOpen': getScanWindowStart(current.time),
-    'scanWindowClose': getScanWindowEnd(current.time),
-    'isActive': foundActive,
+    'current': currentPatrol,
+    'next': nextPatrol,
+    'currentRoundTime': roundInterval.start,
+    'nextRoundTime': nextWindow.start,
+    'currentRoundLabel': currentPatrol.label,
+    'currentRoundNumber': currentPatrol.round,
+    'scanWindowOpen': activeWindow.start,
+    'scanWindowClose': activeWindow.end,
+    'isActive': status.isScanWindowActive,
   };
-}
-
-DateTime getNearestPatrolRoundStart(DateTime now) {
-  final info = getCurrentPatrolRound(now);
-  return info['currentRoundTime'] as DateTime;
 }

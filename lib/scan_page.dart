@@ -116,18 +116,16 @@ class _ScanningPageState extends State<ScanningPage> {
   DateTime _getRoundStart() {
     if (_factoryRounds.isNotEmpty) {
       final info = getCurrentPatrolRound(DateTime.now(), dbRounds: _factoryRounds);
-      return info['currentRoundTime'] as DateTime;
+      return (info['currentRoundTime'] as DateTime?) ?? DateTime.now();
     }
-    return getNearestPatrolRoundStart(DateTime.now());
+    return DateTime.now();
   }
 
   bool _isValidTime() {
     if (_factoryRounds.isNotEmpty) {
       return getFactoryRoundStatus(DateTime.now(), _factoryRounds).isScanWindowActive;
     }
-    final now = DateTime.now();
-    final start = _currentRound;
-    return isWithinPatrolScanWindow(now, start);
+    return false;
   }
 
   String _windowLabel() {

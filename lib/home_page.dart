@@ -126,17 +126,25 @@ class _HomePageState extends State<HomePage> {
 
   void _updateRoundInfo() {
     final roundInfo = _getCurrentRoundSlot();
-    final currentSlot = roundInfo['current'] as PatrolRound;
-    final nextSlot = roundInfo['next'] as PatrolRound;
-    final roundTime = roundInfo['currentRoundTime'] as DateTime;
+    final currentSlot = roundInfo['current'] as PatrolRound?;
+    final nextSlot = roundInfo['next'] as PatrolRound?;
+    final roundTime = roundInfo['currentRoundTime'] as DateTime?;
 
     if (mounted) {
       setState(() {
-        _currentRound = "Round ${currentSlot.round}";
-        _nextRoundTime = "Next: ${nextSlot.label}";
-        _currentRoundStart = roundTime;
-        _scanWindowOpen = roundInfo['scanWindowOpen'] as DateTime;
-        _scanWindowClose = roundInfo['scanWindowClose'] as DateTime;
+        if (currentSlot == null) {
+          _currentRound = "No rounds configured";
+          _nextRoundTime = "No upcoming rounds";
+          _currentRoundStart = null;
+          _scanWindowOpen = null;
+          _scanWindowClose = null;
+        } else {
+          _currentRound = "Round ${currentSlot.round}";
+          _nextRoundTime = nextSlot != null ? "Next: ${nextSlot.label}" : "Next: None";
+          _currentRoundStart = roundTime;
+          _scanWindowOpen = roundInfo['scanWindowOpen'] as DateTime?;
+          _scanWindowClose = roundInfo['scanWindowClose'] as DateTime?;
+        }
       });
     }
   }
@@ -177,8 +185,22 @@ class _HomePageState extends State<HomePage> {
     setState(() => _isLoadingStatus = true);
     final now = DateTime.now();
     final roundInfo = _getCurrentRoundSlot();
-    final roundStart = roundInfo['currentRoundTime'] as DateTime;
-    final roundEnd = roundInfo['scanWindowClose'] as DateTime;
+    final roundStart = roundInfo['currentRoundTime'] as DateTime?;
+    final roundEnd = roundInfo['scanWindowClose'] as DateTime?;
+    
+    if (roundStart == null || roundEnd == null) {
+      if (mounted) {
+        setState(() {
+          _totalQrCount = 0;
+          _scannedCount = 0;
+          _patrolStatus = "No Rounds";
+          _isLoadingStatus = false;
+          _currentRoundStart = null;
+        });
+      }
+      _isRefreshing = false;
+      return;
+    }
     bool isScanWindowClosed = now.isAfter(roundEnd);
     
     try {
@@ -252,6 +274,7 @@ class _HomePageState extends State<HomePage> {
                     _factoryRounds = await loadRoundsForFactory(_selectedFactoryCode);
                     _updateRoundInfo();
                     _refreshPatrolStatus();
+                    _generateRoundSlots();
                   },
                   trailing: _selectedFactoryCode == factory['factory_code']
                       ? const Icon(Icons.check, color: Color(0xFF005C97))
@@ -282,8 +305,18 @@ class _HomePageState extends State<HomePage> {
           ? _factoryRounds
           : await loadRoundsForFactory(_selectedFactoryCode);
 
+      if (dbRounds.isEmpty) {
+        if (mounted) {
+          setState(() {
+            _roundSlots = [];
+            _isLoadingStatus = false;
+          });
+        }
+        return;
+      }
+
       final currentInfo = getCurrentPatrolRound(now, dbRounds: dbRounds);
-      final currentRound = currentInfo['current'] as PatrolRound;
+      final currentRound = currentInfo['current'] as PatrolRound?;
 
       final List<PatrolRound> rounds = [];
       for (final r in dbRounds) {
@@ -297,7 +330,9 @@ class _HomePageState extends State<HomePage> {
         ));
       }
       rounds.sort((a, b) => a.round.compareTo(b.round));
-      final currentIndex = rounds.indexWhere((round) => round.round == currentRound.round);
+      final currentIndex = currentRound != null
+          ? rounds.indexWhere((round) => round.round == currentRound.round)
+          : -1;
 
       // Fix 2: 2 queries total instead of 1 + N (one per round).
       // Fetch QR count and ALL scan history for this factory in parallel.
@@ -329,7 +364,9 @@ class _HomePageState extends State<HomePage> {
             'time': round.time,
             'label': round.label,
             'round': 'Round ${round.round}',
-            'status': 'no_qr'
+            'status': 'no_qr',
+            'scan_window_open': round.scanWindowOpen,
+            'scan_window_close': round.scanWindowClose,
           });
         }
       } else {
@@ -401,6 +438,8 @@ class _HomePageState extends State<HomePage> {
             'label': round.label,
             'round': 'Round ${round.round}',
             'status': status,
+            'scan_window_open': round.scanWindowOpen,
+            'scan_window_close': round.scanWindowClose,
             'guard_name': guardScannedQrs.keys.join(', '),
             'guard_summary': guardSummary,
             'total_scanned': totalScanned,
@@ -510,13 +549,13 @@ class _HomePageState extends State<HomePage> {
                             scanTime = _formatScanTime(scan['scan_time']);
                           } else {
                             final now = DateTime.now();
-                            final scanWindowStart = getScanWindowStart(slotTime);
-                            final scanWindowEnd = getScanWindowEnd(slotTime);
+                            final scanWindowStart = slot['scan_window_open'] as DateTime?;
+                            final scanWindowEnd = slot['scan_window_close'] as DateTime?;
 
-                            if (now.isAfter(scanWindowEnd)) {
+                            if (scanWindowEnd != null && now.isAfter(scanWindowEnd)) {
                               statusText = "Missed";
                               statusColor = Colors.red;
-                            } else if (now.isBefore(scanWindowStart)) {
+                            } else if (scanWindowStart != null && now.isBefore(scanWindowStart)) {
                               statusText = "Pending";
                               statusColor = Colors.grey;
                             } else {
@@ -904,30 +943,44 @@ class _HomePageState extends State<HomePage> {
                         ),
                         const SizedBox(width: 12),
                         Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                _factoryName,
-                                style: const TextStyle(
-                                    fontSize: 18,
-                                    fontWeight: FontWeight.bold,
-                                    color: Colors.black87),
-                              ),
-                              const SizedBox(height: 2),
-                              Text(
-                                "Guard: ${widget.guardName}",
-                                style: const TextStyle(
-                                    fontSize: 12, color: Colors.black54),
-                              ),
-                            ],
+                          child: InkWell(
+                            onTap: widget.isMaster ? _showFactorySelectionDialog : null,
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  children: [
+                                    Flexible(
+                                      child: Text(
+                                        _factoryName,
+                                        style: const TextStyle(
+                                            fontSize: 18,
+                                            fontWeight: FontWeight.bold,
+                                            color: Colors.black87),
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ),
+                                    if (widget.isMaster) ...[
+                                      const SizedBox(width: 4),
+                                      const Icon(Icons.arrow_drop_down, color: Color(0xFF005C97)),
+                                    ],
+                                  ],
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  "Guard: ${widget.guardName}",
+                                  style: const TextStyle(
+                                      fontSize: 12, color: Colors.black54),
+                                ),
+                              ],
+                            ),
                           ),
                         ),
                         if (widget.isMaster)
                           IconButton(
-                            icon: const Icon(Icons.factory, color: Color(0xFF005C97)),
+                            icon: const Icon(Icons.swap_horiz, color: Color(0xFF005C97)),
                             onPressed: _showFactorySelectionDialog,
-                            tooltip: "Select Factory",
+                            tooltip: "Switch Factory",
                           ),
                       ],
                     ),
