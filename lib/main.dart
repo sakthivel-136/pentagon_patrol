@@ -13,6 +13,7 @@ import 'round_utils.dart';
 import 'd1_client.dart';
 import 'offline_sync.dart';
 import 'models/patrol_round.dart';
+import 'app_updater.dart';
 
 final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
     FlutterLocalNotificationsPlugin();
@@ -121,6 +122,10 @@ class _LoginScreenState extends State<LoginScreen> {
       await _scheduleNotifications();
       // Pre-warm local cache of credentials, rounds, and QRs
       _syncBackgroundCache();
+      // Check for APK updates silently in the background
+      if (mounted) {
+        AppUpdater.checkAndPrompt(context, silentIfLatest: true);
+      }
     });
   }
 
@@ -585,13 +590,42 @@ class _LoginScreenState extends State<LoginScreen> {
                   ),
                 ),
 
-                const SizedBox(height: 30),
+                const SizedBox(height: 24),
 
-                const Text(
-                  "Powered by Godvel",
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: Colors.white60,
+                GestureDetector(
+                  onTap: () {
+                    AppUpdater.checkAndPrompt(context, silentIfLatest: false);
+                  },
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Text(
+                        "Powered by Godvel",
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Colors.white60,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: const Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.system_update_alt, size: 11, color: Colors.white70),
+                            SizedBox(width: 3),
+                            Text(
+                              "v1.0.0",
+                              style: TextStyle(fontSize: 10, color: Colors.white70),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ],

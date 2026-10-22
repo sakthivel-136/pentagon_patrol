@@ -5,6 +5,7 @@ import 'dart:async';
 import 'round_utils.dart';
 import 'scan_page.dart';
 import 'models/patrol_round.dart';
+import 'app_updater.dart';
 
 class HomePage extends StatefulWidget {
   final String guardName;
@@ -538,11 +539,11 @@ class _HomePageState extends State<HomePage> {
             return StatefulBuilder(
               builder: (context, setDialogState) {
                 return AlertDialog(
-                  title: Row(
+                  title: const Row(
                     children: [
-                      const Icon(Icons.assessment, color: Color(0xFF005C97)),
-                      const SizedBox(width: 8),
-                      const Expanded(
+                      Icon(Icons.assessment, color: Color(0xFF005C97)),
+                      SizedBox(width: 8),
+                      Expanded(
                         child: Text(
                           "Patrol Rounds Report",
                           style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
@@ -758,6 +759,11 @@ class _HomePageState extends State<HomePage> {
               });
             },
             tooltip: "Refresh Status",
+          ),
+          IconButton(
+            icon: const Icon(Icons.system_update_alt, color: Colors.white),
+            onPressed: () => AppUpdater.checkAndPrompt(context, silentIfLatest: false),
+            tooltip: "Check for Updates",
           ),
           IconButton(
             icon: const Icon(Icons.logout, color: Colors.white),

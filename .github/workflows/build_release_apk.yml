@@ -64,6 +64,26 @@ jobs:
         run: |
           flutter build apk --release
 
+      - name: Generate Version Manifest
+        run: |
+          VERSION=$(grep '^version:' pubspec.yaml | head -n1 | awk '{print $2}' | cut -d'+' -f1)
+          BUILD_NUM=$(grep '^version:' pubspec.yaml | head -n1 | awk '{print $2}' | cut -d'+' -f2)
+          if [ -z "$BUILD_NUM" ] || [ "$BUILD_NUM" = "$VERSION" ]; then
+            BUILD_NUM="${{ github.run_number }}"
+          fi
+
+          mkdir -p build/app/outputs/flutter-apk
+          cat <<EOF > build/app/outputs/flutter-apk/version.json
+          {
+            "version": "$VERSION",
+            "build_number": $BUILD_NUM,
+            "download_url": "https://github.com/sakthivel-136/pentagon_patrol/releases/download/latest-apk/app-release.apk",
+            "release_notes": "Official release update with multi-factory rounds, offline caching, and bug fixes.",
+            "updated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          EOF
+          cat build/app/outputs/flutter-apk/version.json
+
       - name: Upload Release APK Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -75,13 +95,15 @@ jobs:
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/v') || github.ref_name == 'version_test' || github.ref_name == 'main'
         with:
-          files: build/app/outputs/flutter-apk/app-release.apk
+          files: |
+            build/app/outputs/flutter-apk/app-release.apk
+            build/app/outputs/flutter-apk/version.json
           tag_name: latest-apk
           name: "Pentagon Patrol - Guard Release APK"
           body: |
             Official Release APK for Pentagon Patrol Security Guards.
-            - Built with Shorebird OTA Auto-Updates enabled.
+            - Direct In-App APK Auto-Updater enabled (Lifetime free, no expiring keys).
             - Compatible with Android 13 Lite, Go Edition, and Android 7.0+.
-            - Offline scanning and auto-sync support.
+            - Dynamic multi-factory round slots and offline scan caching.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
