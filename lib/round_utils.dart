@@ -174,11 +174,9 @@ Future<List<DbPatrolRound>> loadRoundsForFactory(String factoryCode) async {
     return cached;
   }
 
-  // 3. Fallback to generated default rounds
-  debugPrint("No cached rounds found, using fallback 33 rounds for $resolvedFactory");
-  final fallback = getFallbackDbRounds(resolvedFactory);
-  await saveCachedRounds(resolvedFactory, fallback);
-  return fallback;
+  // 3. Database is the single source of truth - no synthetic hardcoded rounds
+  debugPrint("No rounds configured in D1 or cache for factory $resolvedFactory");
+  return <DbPatrolRound>[];
 }
 
 /// Retrieves locally stored rounds from SharedPreferences for [factoryCode].

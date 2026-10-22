@@ -280,11 +280,12 @@ class _LoginScreenState extends State<LoginScreen> {
     await flutterLocalNotificationsPlugin.cancelAll();
 
     final now = tz.TZDateTime.now(tz.local);
-    final rounds = buildPatrolRounds(DateTime.now());
+    final dbRounds = await loadRoundsForFactory('F001');
 
-    for (int i = 0; i < rounds.length && i < 24; i++) {
-      final windowStart = getScanWindowStart(rounds[i].time);
-      final timeUtc = windowStart.toUtc().subtract(const Duration(minutes: 5));
+    for (int i = 0; i < dbRounds.length && i < 33; i++) {
+      final r = dbRounds[i];
+      final window = resolveWindowInterval(DateTime.now(), r.scanStartTime, r.scanEndTime);
+      final timeUtc = window.start.toUtc().subtract(const Duration(minutes: 5));
       final time = tz.TZDateTime.from(timeUtc, tz.local);
 
       if (time.isBefore(now)) continue;
@@ -292,7 +293,7 @@ class _LoginScreenState extends State<LoginScreen> {
       await flutterLocalNotificationsPlugin.zonedSchedule(
         i,
         "PATROL ALERT",
-        "⏰ Patrol starts in 5 minutes!",
+        "⏰ Round ${r.roundNumber} starts in 5 minutes (${formatTime12h(r.startTime)})!",
         time,
         const NotificationDetails(
           android: AndroidNotificationDetails(

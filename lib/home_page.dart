@@ -341,18 +341,59 @@ class _HomePageState extends State<HomePage> {
           String status;
           List<dynamic> scannedData = scansBySlot[slotKey] ?? [];
 
-          if (i < currentIndex) {
-            final seenQrIds = <String>{};
-            for (var scan in scannedData) {
-              if (_isSuccessStatus(scan['status'])) {
-                seenQrIds.add(scan['qr_id'].toString());
+          final Map<String, Set<String>> guardScannedQrs = {};
+          final Set<String> allScannedQrIds = {};
+          for (var scan in scannedData) {
+            if (_isSuccessStatus(scan['status'])) {
+              final qId = scan['qr_id']?.toString() ?? '';
+              final gName = (scan['guard_name'] != null && scan['guard_name'].toString().trim().isNotEmpty)
+                  ? scan['guard_name'].toString().trim()
+                  : 'Guard';
+              if (qId.isNotEmpty) {
+                allScannedQrIds.add(qId);
+                guardScannedQrs.putIfAbsent(gName, () => <String>{}).add(qId);
               }
             }
-            status = seenQrIds.length >= totalQrCount ? 'success' : 'missed';
+          }
+
+          final int totalScanned = allScannedQrIds.length;
+          final int missedCount = totalQrCount > totalScanned ? (totalQrCount - totalScanned) : 0;
+
+          if (i < currentIndex) {
+            status = totalScanned >= totalQrCount ? 'success' : 'missed';
           } else if (i == currentIndex) {
             status = 'current';
           } else {
             status = 'future';
+          }
+
+          String guardSummary;
+          if (guardScannedQrs.isEmpty) {
+            if (i < currentIndex) {
+              guardSummary = "No scans recorded • Missed: $totalQrCount/$totalQrCount";
+            } else if (i == currentIndex) {
+              guardSummary = "In progress (0/$totalQrCount scanned)";
+            } else {
+              guardSummary = "Scheduled";
+            }
+          } else if (guardScannedQrs.length == 1) {
+            final gName = guardScannedQrs.keys.first;
+            final count = guardScannedQrs[gName]!.length;
+            if (count >= totalQrCount) {
+              guardSummary = "$gName: $count/$totalQrCount scanned (Completed)";
+            } else {
+              guardSummary = "$gName: $count/$totalQrCount scanned • Missed: $missedCount";
+            }
+          } else {
+            // 2 or more guards scanned
+            final breakdown = guardScannedQrs.entries
+                .map((e) => "${e.key}: ${e.value.length}/$totalQrCount")
+                .join(" • ");
+            if (totalScanned >= totalQrCount) {
+              guardSummary = "$breakdown (Total: $totalScanned/$totalQrCount Completed)";
+            } else {
+              guardSummary = "$breakdown • Total: $totalScanned/$totalQrCount (Missed: $missedCount)";
+            }
           }
 
           slots.add({
@@ -360,17 +401,11 @@ class _HomePageState extends State<HomePage> {
             'label': round.label,
             'round': 'Round ${round.round}',
             'status': status,
-            'guard_name': status == 'success'
-                ? (scannedData.isNotEmpty && scannedData.first['guard_name'] != null)
-                    ? scannedData.first['guard_name']
-                    : "Completed"
-                : (status == 'missed')
-                    ? (scannedData.isNotEmpty && scannedData.first['guard_name'] != null)
-                        ? scannedData.first['guard_name']
-                        : "No guard"
-                : (status == 'current')
-                    ? "In progress"
-                    : "Not started",
+            'guard_name': guardScannedQrs.keys.join(', '),
+            'guard_summary': guardSummary,
+            'total_scanned': totalScanned,
+            'missed_count': missedCount,
+            'total_qr_count': totalQrCount,
           });
         }
       }
@@ -408,12 +443,57 @@ class _HomePageState extends State<HomePage> {
               title: Text("${slot['round']} Details (${slot['label']})"),
               content: SizedBox(
                 width: double.maxFinite,
-                height: 400,
-                child: allQrData.isEmpty
-                    ? const Center(child: Text("No QR codes assigned to this factory"))
-                    : ListView.builder(
-                        itemCount: allQrData.length,
-                        itemBuilder: (context, index) {
+                height: 440,
+                child: Column(
+                  children: [
+                    // Top Checkpoint Status & Guard Summary Header
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      margin: const EdgeInsets.only(bottom: 10),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF005C97).withValues(alpha: 0.08),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: const Color(0xFF005C97).withValues(alpha: 0.2)),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Text(
+                                "Checkpoints: ${slot['total_scanned'] ?? 0} / ${allQrData.length} Scanned",
+                                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Color(0xFF005C97)),
+                              ),
+                              Text(
+                                (slot['missed_count'] ?? 0) > 0
+                                    ? "Missed: ${slot['missed_count']}"
+                                    : "All Completed",
+                                style: TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 12,
+                                  color: (slot['missed_count'] ?? 0) > 0 ? Colors.red.shade700 : Colors.green.shade700,
+                                ),
+                              ),
+                            ],
+                          ),
+                          if (slot['guard_summary'] != null && slot['guard_summary'].toString().isNotEmpty) ...[
+                            const SizedBox(height: 4),
+                            Text(
+                              slot['guard_summary'],
+                              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.black87),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                    Expanded(
+                      child: allQrData.isEmpty
+                          ? const Center(child: Text("No QR codes assigned to this factory"))
+                          : ListView.builder(
+                              itemCount: allQrData.length,
+                              itemBuilder: (context, index) {
                           final qr = allQrData[index];
                           final qrId = qr['qr_id'].toString();
                           final isScanned = scannedQrMap.containsKey(qrId);
@@ -498,6 +578,9 @@ class _HomePageState extends State<HomePage> {
                           );
                         },
                       ),
+                    ),
+                  ],
+                ),
               ),
               actions: [
                 TextButton(
@@ -648,19 +731,40 @@ class _HomePageState extends State<HomePage> {
                                         }
                                         return Card(
                                           margin: const EdgeInsets.symmetric(vertical: 4),
+                                          elevation: 1,
+                                          shape: RoundedRectangleBorder(
+                                            borderRadius: BorderRadius.circular(10),
+                                            side: BorderSide(color: Colors.grey.shade200),
+                                          ),
                                           child: ListTile(
-                                            title: Text(slot['round']),
-                                            subtitle: Column(
-                                              crossAxisAlignment: CrossAxisAlignment.start,
+                                            contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+                                            title: Row(
+                                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
                                               children: [
-                                                Text(slot['label']),
-                                                const SizedBox(height: 2),
                                                 Text(
-                                                  "Guard: ${slot['guard_name'] ?? 'Unknown'}",
-                                                  style: const TextStyle(
-                                                      fontSize: 12, color: Colors.black54),
+                                                  slot['round'],
+                                                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                                                ),
+                                                Text(
+                                                  slot['label'],
+                                                  style: const TextStyle(fontSize: 12, color: Colors.black54, fontWeight: FontWeight.w500),
                                                 ),
                                               ],
+                                            ),
+                                            subtitle: Padding(
+                                              padding: const EdgeInsets.only(top: 6.0),
+                                              child: Text(
+                                                slot['guard_summary'] ?? slot['guard_name'] ?? 'No data',
+                                                style: TextStyle(
+                                                  fontSize: 12.5,
+                                                  fontWeight: FontWeight.w600,
+                                                  color: status == 'success'
+                                                      ? Colors.green.shade800
+                                                      : status == 'missed'
+                                                          ? Colors.red.shade800
+                                                          : const Color(0xFF005C97),
+                                                ),
+                                              ),
                                             ),
                                             trailing: Container(
                                               padding: const EdgeInsets.symmetric(
@@ -673,7 +777,7 @@ class _HomePageState extends State<HomePage> {
                                               child: Text(
                                                 statusText,
                                                 style: TextStyle(
-                                                  fontSize: 12,
+                                                  fontSize: 11.5,
                                                   fontWeight: FontWeight.bold,
                                                   color: statusColor,
                                                 ),
