@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:timezone/data/latest_all.dart' as tz;
 import 'package:timezone/timezone.dart' as tz;
 import 'package:connectivity_plus/connectivity_plus.dart';
@@ -9,6 +11,8 @@ import 'package:permission_handler/permission_handler.dart';
 import 'home_page.dart';
 import 'round_utils.dart';
 import 'd1_client.dart';
+import 'offline_sync.dart';
+import 'models/patrol_round.dart';
 
 final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
     FlutterLocalNotificationsPlugin();
@@ -105,8 +109,8 @@ class LoginScreen extends StatefulWidget {
 
 class _LoginScreenState extends State<LoginScreen> {
   final _pinCtrl = TextEditingController();
-
   bool _loading = false;
+  static const String _kCachedUsersKey = 'pentagon_cached_users';
 
   @override
   void initState() {
@@ -115,13 +119,14 @@ class _LoginScreenState extends State<LoginScreen> {
     Future.delayed(const Duration(milliseconds: 500), () async {
       await _requestNotificationPermission();
       await _scheduleNotifications();
+      // Pre-warm local cache of credentials, rounds, and QRs
+      _syncBackgroundCache();
     });
   }
 
   @override
   void dispose() {
     _pinCtrl.dispose();
-
     super.dispose();
   }
 
@@ -129,25 +134,135 @@ class _LoginScreenState extends State<LoginScreen> {
 
   Future<bool> _isOnline() async {
     final result = await Connectivity().checkConnectivity();
-
     return !result.contains(ConnectivityResult.none);
   }
 
-// ================= TIME ==================
+// ================= CACHE SYNC ==================
 
-  DateTime _getNextRound(DateTime dt) {
-    if (dt.minute <= 30) {
-      return DateTime(dt.year, dt.month, dt.day, dt.hour, 30);
-    } else {
-      return DateTime(dt.year, dt.month, dt.day, dt.hour + 1, 0);
+  /// Syncs user credentials, factory rounds, and QRs into local storage for offline use.
+  Future<void> _syncBackgroundCache() async {
+    if (!await _isOnline()) return;
+
+    try {
+      final prefs = await SharedPreferences.getInstance();
+
+      // 1. Fetch & cache security users and admins
+      final usersMap = <String, Map<String, dynamic>>{};
+
+      final admins = await D1Client.query(
+        "SELECT name, user_pin, role FROM login_info WHERE is_active = 1",
+      );
+      for (final a in admins) {
+        if (a['user_pin'] != null) {
+          usersMap[a['user_pin'].toString().trim()] = {
+            'name': a['name'] ?? 'Admin',
+            'factory': 'ADMIN',
+            'role': a['role'] ?? 'ADMIN',
+            'isAdmin': true,
+          };
+        }
+      }
+
+      final guards = await D1Client.query(
+        "SELECT security_name, factory, security_password FROM security_users",
+      );
+      final factoryCodes = <String>{};
+      for (final g in guards) {
+        if (g['security_password'] != null) {
+          final f = (g['factory'] ?? 'F001').toString().trim();
+          factoryCodes.add(f);
+          usersMap[g['security_password'].toString().trim()] = {
+            'name': g['security_name'] ?? 'Guard',
+            'factory': f,
+            'role': 'GUARD',
+            'isAdmin': false,
+          };
+        }
+      }
+
+      await prefs.setString(_kCachedUsersKey, jsonEncode(usersMap));
+      debugPrint("Cached ${usersMap.length} user login profiles locally.");
+
+      // 2. Pre-fetch rounds and QR checkpoints for each factory
+      for (final fc in factoryCodes) {
+        loadRoundsForFactory(fc);
+        D1Client.query(
+          'SELECT qr_id, qr_name, lat, log, factory_code FROM qr WHERE factory_code = ? AND status = ?',
+          [fc, 'active'],
+        ).then((qrRows) {
+          if (qrRows.isNotEmpty) {
+            OfflineSyncManager.cacheCheckpoints(
+              fc,
+              qrRows.map((e) => Map<String, dynamic>.from(e)).toList(),
+            );
+          }
+        }).catchError((_) {});
+      }
+
+      // 3. Flush any pending offline scans from previous runs
+      OfflineSyncManager.syncPendingScans();
+    } catch (e) {
+      debugPrint("Background cache sync error: $e");
     }
+  }
+
+  Future<Map<String, dynamic>?> _lookupUser(String pin) async {
+    // 1. If online, query D1 directly
+    if (await _isOnline()) {
+      try {
+        final adminList = await D1Client.query(
+          "SELECT name, role FROM login_info WHERE user_pin = ? AND is_active = 1 LIMIT 1",
+          [pin],
+        );
+        if (adminList.isNotEmpty) {
+          final admin = adminList[0];
+          return {
+            'name': admin['name'] ?? 'Admin',
+            'factory': 'ADMIN',
+            'role': admin['role'] ?? 'ADMIN',
+            'isAdmin': true,
+          };
+        }
+
+        final guardList = await D1Client.query(
+          "SELECT security_name, factory FROM security_users WHERE security_password = ? LIMIT 1",
+          [pin],
+        );
+        if (guardList.isNotEmpty) {
+          final guard = guardList[0];
+          return {
+            'name': guard['security_name'] ?? 'Guard',
+            'factory': guard['factory'] ?? 'F001',
+            'role': 'GUARD',
+            'isAdmin': false,
+          };
+        }
+      } catch (e) {
+        debugPrint("Online lookup failed, trying local cache: $e");
+      }
+    }
+
+    // 2. Fallback to locally cached credentials
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_kCachedUsersKey);
+      if (raw != null && raw.isNotEmpty) {
+        final Map<String, dynamic> users = jsonDecode(raw);
+        if (users.containsKey(pin)) {
+          return Map<String, dynamic>.from(users[pin]);
+        }
+      }
+    } catch (e) {
+      debugPrint("Offline user lookup error: $e");
+    }
+
+    return null;
   }
 
 // ================= NOTIFICATION ==================
 
   Future<void> _requestNotificationPermission() async {
     final status = await Permission.notification.status;
-
     if (!status.isGranted) {
       final result = await Permission.notification.request();
       if (!result.isGranted) {
@@ -193,65 +308,78 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
-// ================= LOGIN ==================
+// ================= LOGIN & SCAN WINDOW ENFORCEMENT ==================
 
   Future<void> _login(String pin) async {
     if (pin.length != 4) return;
 
-    if (!await _isOnline()) {
-      _pinCtrl.clear();
-
-      _showMsg("No Internet");
-
-      return;
-    }
-
     setState(() => _loading = true);
 
     try {
-      final adminList = await D1Client.query(
-        "SELECT name, role FROM login_info WHERE user_pin = ? AND is_active = 1 LIMIT 1",
-        [pin],
-      );
-      final admin = adminList.isNotEmpty ? adminList[0] : null;
+      final user = await _lookupUser(pin);
 
-      if (admin != null) {
-        _goHome(
-          admin['name'],
-          'ADMIN',
-          true,
-          true,
-        );
-
+      if (user == null) {
+        _pinCtrl.clear();
+        _showMsg("INVALID PIN");
         return;
       }
 
-      final guardList = await D1Client.query(
-        "SELECT security_name, factory FROM security_users WHERE security_password = ? LIMIT 1",
-        [pin],
-      );
-      final guard = guardList.isNotEmpty ? guardList[0] : null;
+      final bool isAdmin = user['isAdmin'] == true;
+      final String guardName = user['name'] ?? 'Guard';
+      final String factoryCode = user['factory'] ?? 'F001';
 
-      if (guard != null) {
-        _goHome(
-          guard['security_name'],
-          guard['factory'],
-          false,
-          true,
-        );
-
+      // ADMINS can log in at any time
+      if (isAdmin) {
+        _goHome(guardName, 'ADMIN', true, true);
         return;
       }
 
-      _pinCtrl.clear();
+      // FOR SECURITY GUARDS: ENFORCE FACTORY'S DYNAMIC SCAN WINDOW
+      final rounds = await loadRoundsForFactory(factoryCode);
+      final status = getFactoryRoundStatus(DateTime.now(), rounds);
 
-      _showMsg("INVALID PIN");
+      if (status.isScanWindowActive) {
+        // Window is OPEN -> allow login into scan interface
+        _goHome(guardName, factoryCode, false, true);
+      } else {
+        // Window is CLOSED -> block login and display live countdown
+        _pinCtrl.clear();
+        if (mounted) {
+          _showScanWindowBlockedDialog(guardName, factoryCode, status, rounds);
+        }
+      }
     } catch (e) {
       debugPrint("Login error: $e");
-      _showMsg("Server Error");
+      _showMsg("Login Error. Please retry.");
     } finally {
       if (mounted) setState(() => _loading = false);
     }
+  }
+
+// ================= SCAN WINDOW BLOCKED MODAL ==================
+
+  void _showScanWindowBlockedDialog(
+    String guardName,
+    String factoryCode,
+    FactoryRoundStatus initialStatus,
+    List<DbPatrolRound> rounds,
+  ) {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) {
+        return _ScanWindowBlockedDialog(
+          guardName: guardName,
+          factoryCode: factoryCode,
+          initialStatus: initialStatus,
+          rounds: rounds,
+          onWindowOpened: () {
+            Navigator.of(ctx).pop();
+            _goHome(guardName, factoryCode, false, true);
+          },
+        );
+      },
+    );
   }
 
 // ================= UI HELPERS ==================
@@ -469,6 +597,223 @@ class _LoginScreenState extends State<LoginScreen> {
               ],
             ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+// ==============================================================================
+// SCAN WINDOW BLOCKED DIALOG WITH LIVE COUNTDOWN
+// ==============================================================================
+
+class _ScanWindowBlockedDialog extends StatefulWidget {
+  final String guardName;
+  final String factoryCode;
+  final FactoryRoundStatus initialStatus;
+  final List<DbPatrolRound> rounds;
+  final VoidCallback onWindowOpened;
+
+  const _ScanWindowBlockedDialog({
+    required this.guardName,
+    required this.factoryCode,
+    required this.initialStatus,
+    required this.rounds,
+    required this.onWindowOpened,
+  });
+
+  @override
+  State<_ScanWindowBlockedDialog> createState() => _ScanWindowBlockedDialogState();
+}
+
+class _ScanWindowBlockedDialogState extends State<_ScanWindowBlockedDialog> {
+  Timer? _countdownTimer;
+  late FactoryRoundStatus _status;
+
+  @override
+  void initState() {
+    super.initState();
+    _status = widget.initialStatus;
+
+    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      final now = DateTime.now();
+      final updatedStatus = getFactoryRoundStatus(now, widget.rounds);
+
+      if (updatedStatus.isScanWindowActive) {
+        _countdownTimer?.cancel();
+        widget.onWindowOpened();
+      } else {
+        if (mounted) {
+          setState(() {
+            _status = updatedStatus;
+          });
+        }
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _countdownTimer?.cancel();
+    super.dispose();
+  }
+
+  String _formatDuration(Duration? d) {
+    if (d == null) return "soon";
+    final totalSec = d.inSeconds;
+    if (totalSec <= 0) return "opening now";
+    final hours = totalSec ~/ 3600;
+    final minutes = (totalSec % 3600) ~/ 60;
+    final seconds = totalSec % 60;
+
+    if (hours > 0) {
+      return "${hours}h ${minutes}m ${seconds.toString().padLeft(2, '0')}s";
+    }
+    return "${minutes}m ${seconds.toString().padLeft(2, '0')}s";
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final nextRound = _status.nextRound;
+    final countdownStr = _formatDuration(_status.timeUntilNextWindow);
+
+    return Dialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      child: Padding(
+        padding: const EdgeInsets.all(22),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Icon
+            Container(
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: Colors.amber.shade50,
+                shape: BoxShape.circle,
+                border: Border.all(color: Colors.amber.shade200, width: 2),
+              ),
+              child: Icon(
+                Icons.lock_clock,
+                size: 38,
+                color: Colors.amber.shade800,
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // Title
+            const Text(
+              "Login Window Closed",
+              style: TextStyle(
+                fontSize: 19,
+                fontWeight: FontWeight.bold,
+                color: Color(0xFF1E293B),
+              ),
+            ),
+            const SizedBox(height: 6),
+
+            Text(
+              "Security Guard: ${widget.guardName}\nFactory: ${widget.factoryCode}",
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 12.5,
+                color: Colors.grey.shade600,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // Live Countdown Card
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: const Color(0xFFF8FAFC),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: const Color(0xFFE2E8F0)),
+              ),
+              child: Column(
+                children: [
+                  const Text(
+                    "NEXT PATROL SCAN WINDOW",
+                    style: TextStyle(
+                      fontSize: 10.5,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 0.8,
+                      color: Color(0xFF64748B),
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  if (nextRound != null) ...[
+                    Text(
+                      "Round ${nextRound.roundNumber.toString().padLeft(2, '0')}",
+                      style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        color: Color(0xFF005C97),
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      "Window: ${formatTime12h(nextRound.scanStartTime)} – ${formatTime12h(nextRound.scanEndTime)}",
+                      style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFF334155),
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 10),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: Colors.amber.shade100,
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Text(
+                      "Opens in: $countdownStr",
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.amber.shade900,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+            const SizedBox(height: 14),
+            Text(
+              "Guards can only log into VeriPatrol when their factory's scan window is open.",
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 11,
+                color: Colors.grey.shade500,
+                fontStyle: FontStyle.italic,
+              ),
+            ),
+            const SizedBox(height: 18),
+
+            // Close button
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton(
+                onPressed: () => Navigator.of(context).pop(),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF005C97),
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                ),
+                child: const Text(
+                  "OK",
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                ),
+              ),
+            ),
+          ],
         ),
       ),
     );

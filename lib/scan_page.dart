@@ -13,6 +13,7 @@ import 'package:connectivity_plus/connectivity_plus.dart';
 
 import 'round_utils.dart';
 import 'offline_sync.dart';
+import 'models/patrol_round.dart';
 
 class ScanningPage extends StatefulWidget {
   final String guardName;
@@ -34,6 +35,7 @@ class _ScanningPageState extends State<ScanningPage> {
   final MobileScannerController scannerController = MobileScannerController();
 
   List<Map<String, dynamic>> _checkpoints = [];
+  List<DbPatrolRound> _factoryRounds = [];
 
   // Fix 5: Cache QR list — it never changes mid-session.
   // Only scanning_details are re-fetched on every sync tick.
@@ -77,6 +79,18 @@ class _ScanningPageState extends State<ScanningPage> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _requestRequiredPermissions();
     });
+
+    // Load factory-specific dynamic rounds
+    loadRoundsForFactory(widget.factoryCode).then((r) {
+      if (mounted) {
+        setState(() {
+          _factoryRounds = r;
+          _currentRound = _getRoundStart();
+          _fetchCheckpoints();
+        });
+      }
+    });
+
     _fetchCheckpoints();
 
     // Check for offline scans that need syncing on startup
@@ -100,12 +114,18 @@ class _ScanningPageState extends State<ScanningPage> {
   // ================= SLOT =================
 
   DateTime _getRoundStart() {
+    if (_factoryRounds.isNotEmpty) {
+      final info = getCurrentPatrolRound(DateTime.now(), dbRounds: _factoryRounds);
+      return info['currentRoundTime'] as DateTime;
+    }
     return getNearestPatrolRoundStart(DateTime.now());
   }
 
   bool _isValidTime() {
+    if (_factoryRounds.isNotEmpty) {
+      return getFactoryRoundStatus(DateTime.now(), _factoryRounds).isScanWindowActive;
+    }
     final now = DateTime.now();
-
     final start = _currentRound;
     return isWithinPatrolScanWindow(now, start);
   }
@@ -145,11 +165,11 @@ class _ScanningPageState extends State<ScanningPage> {
   Future<void> _fetchCheckpoints() async {
     try {
       final now = DateTime.now();
-      final roundInfo = getCurrentPatrolRound(now);
+      final roundInfo = getCurrentPatrolRound(now, dbRounds: _factoryRounds);
       _currentRound = roundInfo['currentRoundTime'] as DateTime;
       _currentRoundLabel = roundInfo['currentRoundLabel'] as String;
-      _currentWindowStart = roundInfo['scanWindowOpen'] as DateTime;
-      _currentWindowEnd = roundInfo['scanWindowClose'] as DateTime;
+      _currentWindowStart = roundInfo['scanWindowOpen'] as DateTime?;
+      _currentWindowEnd = roundInfo['scanWindowClose'] as DateTime?;
       _scanAvailable = roundInfo['isActive'] as bool;
 
       // Fix 3 + Fix 5 + Offline Cache:
@@ -568,54 +588,6 @@ class _ScanningPageState extends State<ScanningPage> {
       }
     } catch (e) {
       debugPrint("Error in _syncOfflineScans: $e");
-    }
-  }
-
-  // ================= SAVE MISSED =================
-
-  Future<void> _saveMissed(Map p) async {
-    if (_isProcessing) return;
-
-    setState(() => _isProcessing = true);
-
-    try {
-      if (!await _isOnline()) {
-        _msg('NO INTERNET', Colors.red);
-        return;
-      }
-
-      var pos = await _getCurrentPosition();
-      if (pos == null) {
-        _msg('CANNOT GET LOCATION - SCAN FAILED', Colors.red);
-        return;
-      }
-
-      await D1Client.query(
-        'INSERT INTO scanning_details (guard_name, qr_id, qr_name, lat, log, factory_code, scan_time, round_slot, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        [
-          widget.guardName,
-          p['qr_id'].toString(),
-          p['qr_name'],
-          pos.latitude,
-          pos.longitude,
-          widget.factoryCode,
-          DateTime.now().toUtc().toIso8601String(),
-          _currentRound.toUtc().toIso8601String(),
-          'MISSED'
-        ],
-      );
-
-      _fetchCheckpoints();
-      _msg("MARKED MISSED", Colors.red);
-    } catch (e) {
-      debugPrint("Missed error: $e");
-      _msg("UPLOAD FAILED", Colors.red);
-    } finally {
-      if (mounted) {
-        setState(() => _isProcessing = false);
-      } else {
-        _isProcessing = false;
-      }
     }
   }
 

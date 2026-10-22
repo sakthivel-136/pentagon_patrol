@@ -4,6 +4,7 @@ import 'd1_client.dart';
 import 'dart:async';
 import 'round_utils.dart';
 import 'scan_page.dart';
+import 'models/patrol_round.dart';
 
 class HomePage extends StatefulWidget {
   final String guardName;
@@ -31,6 +32,7 @@ class _HomePageState extends State<HomePage> {
   String _nextRoundTime = "";
   List<Map<String, dynamic>> _factories = [];
   List<Map<String, dynamic>> _roundSlots = [];
+  List<DbPatrolRound> _factoryRounds = [];
   String _patrolStatus = "In Progress";
   DateTime? _currentRoundStart;
   DateTime? _scanWindowOpen;
@@ -58,6 +60,9 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _fetchInitialData() async {
     try {
+      // 1. Fetch factory-specific rounds from database/cache
+      _factoryRounds = await loadRoundsForFactory(_selectedFactoryCode);
+
       // Fix 1: Only 2 parallel requests now — _fetchFactoryName() removed.
       // Factory name is derived locally from the _fetchFactories() result.
       await Future.wait([
@@ -114,30 +119,8 @@ class _HomePageState extends State<HomePage> {
     if (mounted) setState(() => _factoryName = match['factory_name']);
   }
 
-  // Only called when factories list isn't loaded yet (edge case)
-  Future<void> _fetchFactoryName() async {
-    if (_factories.isNotEmpty) {
-      _resolveFactoryName();
-      return;
-    }
-    if (_selectedFactoryCode == 'ADMIN') {
-      if (mounted) setState(() => _factoryName = 'Administrator');
-      return;
-    }
-    try {
-      final dataList = await D1Client
-          .query('SELECT factory_name FROM factories WHERE factory_code = ? LIMIT 1', [_selectedFactoryCode]);
-      final data = dataList.isNotEmpty ? dataList[0] : null;
-      if (mounted && data != null) {
-        setState(() => _factoryName = data['factory_name']);
-      }
-    } catch (e) {
-      if (mounted) setState(() => _factoryName = 'Unknown Factory');
-    }
-  }
-
   Map<String, dynamic> _getCurrentRoundSlot() {
-    return getCurrentPatrolRound(DateTime.now());
+    return getCurrentPatrolRound(DateTime.now(), dbRounds: _factoryRounds);
   }
 
   void _updateRoundInfo() {
@@ -158,12 +141,13 @@ class _HomePageState extends State<HomePage> {
   }
 
   bool _isWithinScanWindow() {
+    if (_factoryRounds.isNotEmpty) {
+      return getFactoryRoundStatus(DateTime.now(), _factoryRounds).isScanWindowActive;
+    }
     final now = DateTime.now();
-
     if (_currentRoundStart == null || _scanWindowOpen == null || _scanWindowClose == null) {
       return false;
     }
-
     return !now.isBefore(_scanWindowOpen!) && now.isBefore(_scanWindowClose!);
   }
 
@@ -254,7 +238,7 @@ class _HomePageState extends State<HomePage> {
                 return ListTile(
                   title: Text(factory['factory_name']),
                   subtitle: Text("Code: ${factory['factory_code']}"),
-                  onTap: () {
+                  onTap: () async {
                     setState(() {
                       _selectedFactoryCode = factory['factory_code'];
                       _factoryName = factory['factory_name'];
@@ -264,6 +248,8 @@ class _HomePageState extends State<HomePage> {
                       _patrolStatus = "In Progress";
                     });
                     Navigator.of(context).pop();
+                    _factoryRounds = await loadRoundsForFactory(_selectedFactoryCode);
+                    _updateRoundInfo();
                     _refreshPatrolStatus();
                   },
                   trailing: _selectedFactoryCode == factory['factory_code']
