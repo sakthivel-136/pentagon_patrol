@@ -14,6 +14,8 @@ import 'd1_client.dart';
 import 'offline_sync.dart';
 import 'models/patrol_round.dart';
 import 'app_updater.dart';
+import 'shift_utils.dart';
+import 'models/shift.dart';
 
 final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
     FlutterLocalNotificationsPlugin();
@@ -169,7 +171,7 @@ class _LoginScreenState extends State<LoginScreen> {
       }
 
       final guards = await D1Client.query(
-        "SELECT security_name, factory, security_password FROM security_users",
+        "SELECT security_id, security_name, factory, security_password FROM security_users",
       );
       final factoryCodes = <String>{};
       for (final g in guards) {
@@ -181,12 +183,16 @@ class _LoginScreenState extends State<LoginScreen> {
             'factory': f,
             'role': 'GUARD',
             'isAdmin': false,
+            'securityId': (g['security_id'] ?? '').toString().trim(),
           };
         }
       }
 
       await prefs.setString(_kCachedUsersKey, jsonEncode(usersMap));
       debugPrint("Cached ${usersMap.length} user login profiles locally.");
+
+      // Pre-fetch shifts and guard allocations for each factory
+      prefetchShiftsAndAllocations(factoryCodes);
 
       // 2. Pre-fetch rounds and QR checkpoints for each factory
       for (final fc in factoryCodes) {
@@ -230,7 +236,7 @@ class _LoginScreenState extends State<LoginScreen> {
         }
 
         final guardList = await D1Client.query(
-          "SELECT security_name, factory FROM security_users WHERE security_password = ? LIMIT 1",
+          "SELECT security_id, security_name, factory FROM security_users WHERE security_password = ? LIMIT 1",
           [pin],
         );
         if (guardList.isNotEmpty) {
@@ -240,6 +246,7 @@ class _LoginScreenState extends State<LoginScreen> {
             'factory': guard['factory'] ?? 'F001',
             'role': 'GUARD',
             'isAdmin': false,
+            'securityId': (guard['security_id'] ?? '').toString().trim(),
           };
         }
       } catch (e) {
@@ -333,6 +340,7 @@ class _LoginScreenState extends State<LoginScreen> {
       final bool isAdmin = user['isAdmin'] == true;
       final String guardName = user['name'] ?? 'Guard';
       final String factoryCode = user['factory'] ?? 'F001';
+      final String securityId = (user['securityId'] ?? '').toString().trim();
 
       // ADMINS can log in at any time
       if (isAdmin) {
@@ -340,7 +348,27 @@ class _LoginScreenState extends State<LoginScreen> {
         return;
       }
 
-      // FOR SECURITY GUARDS: ENFORCE FACTORY'S DYNAMIC SCAN WINDOW
+      // 1. FOR SECURITY GUARDS: ENFORCE SHIFT ALLOCATION CRITERIA
+      // If it is not his shift timing, do not allow him even if scan window is open!
+      final shiftCheck = await validateGuardShiftAccess(
+        factoryCode: factoryCode,
+        securityId: securityId,
+      );
+
+      if (!shiftCheck.isAllowed) {
+        _pinCtrl.clear();
+        if (mounted) {
+          _showShiftBlockedDialog(
+            guardName: guardName,
+            factoryCode: factoryCode,
+            activeShift: shiftCheck.activeShift,
+            errorMessage: shiftCheck.errorMessage,
+          );
+        }
+        return;
+      }
+
+      // 2. ENFORCE FACTORY'S DYNAMIC SCAN WINDOW
       final rounds = await loadRoundsForFactory(factoryCode);
       final status = getFactoryRoundStatus(DateTime.now(), rounds);
 
@@ -360,6 +388,153 @@ class _LoginScreenState extends State<LoginScreen> {
     } finally {
       if (mounted) setState(() => _loading = false);
     }
+  }
+
+// ================= SHIFT BLOCKED MODAL ==================
+
+  void _showShiftBlockedDialog({
+    required String guardName,
+    required String factoryCode,
+    DbShift? activeShift,
+    String? errorMessage,
+  }) {
+    showDialog(
+      context: context,
+      barrierDismissible: true,
+      builder: (ctx) {
+        final shiftName = activeShift?.shiftName ?? "Active Shift";
+        final shiftTimes = activeShift != null
+            ? "${formatTime12h(activeShift.startTime)} – ${formatTime12h(activeShift.endTime)}"
+            : "";
+
+        return Dialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          child: Padding(
+            padding: const EdgeInsets.all(22),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Red/Amber alert badge
+                Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: Colors.red.shade50,
+                    shape: BoxShape.circle,
+                    border: Border.all(color: Colors.red.shade200, width: 2),
+                  ),
+                  child: Icon(
+                    Icons.lock_person_rounded,
+                    size: 38,
+                    color: Colors.red.shade700,
+                  ),
+                ),
+                const SizedBox(height: 16),
+
+                // Title
+                const Text(
+                  "Shift Access Restricted",
+                  style: TextStyle(
+                    fontSize: 19,
+                    fontWeight: FontWeight.bold,
+                    color: Color(0xFF1E293B),
+                  ),
+                ),
+                const SizedBox(height: 6),
+
+                Text(
+                  "Security Guard: $guardName\nFactory: $factoryCode",
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: Colors.grey.shade600,
+                    height: 1.4,
+                  ),
+                ),
+                const SizedBox(height: 16),
+
+                // Active shift info banner
+                if (activeShift != null) ...[
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 14),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF0F172A),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Column(
+                      children: [
+                        Text(
+                          "CURRENT ACTIVE SHIFT",
+                          style: TextStyle(
+                            fontSize: 10,
+                            letterSpacing: 1.2,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.amber.shade400,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          shiftName,
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white,
+                          ),
+                        ),
+                        if (shiftTimes.isNotEmpty) ...[
+                          const SizedBox(height: 2),
+                          Text(
+                            shiftTimes,
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Colors.grey.shade300,
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                ],
+
+                // Explanation
+                Text(
+                  errorMessage ??
+                      "You are not assigned to this shift. Guards are only permitted to log in during their allocated shift.",
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    fontSize: 13,
+                    color: Color(0xFF475569),
+                    height: 1.4,
+                  ),
+                ),
+                const SizedBox(height: 20),
+
+                // Dismiss Button
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton(
+                    onPressed: () => Navigator.of(ctx).pop(),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF005C97),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                    ),
+                    child: const Text(
+                      "UNDERSTOOD",
+                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
   }
 
 // ================= SCAN WINDOW BLOCKED MODAL ==================

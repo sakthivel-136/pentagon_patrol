@@ -6,6 +6,7 @@ import 'round_utils.dart';
 import 'scan_page.dart';
 import 'models/patrol_round.dart';
 import 'app_updater.dart';
+import 'shift_utils.dart';
 
 class HomePage extends StatefulWidget {
   final String guardName;
@@ -34,6 +35,7 @@ class _HomePageState extends State<HomePage> {
   List<Map<String, dynamic>> _factories = [];
   List<Map<String, dynamic>> _roundSlots = [];
   List<DbPatrolRound> _factoryRounds = [];
+  String _currentShiftLabel = "";
   String _patrolStatus = "In Progress";
   DateTime? _currentRoundStart;
   DateTime? _scanWindowOpen;
@@ -63,6 +65,21 @@ class _HomePageState extends State<HomePage> {
     try {
       // 1. Fetch factory-specific rounds from database/cache
       _factoryRounds = await loadRoundsForFactory(_selectedFactoryCode);
+
+      // Fetch active shift for display
+      loadShiftsForFactory(_selectedFactoryCode).then((shifts) {
+        final now = DateTime.now();
+        for (final s in shifts) {
+          if (isTimeWithinShift(now, s.startTime, s.endTime)) {
+            if (mounted) {
+              setState(() {
+                _currentShiftLabel = "${s.shiftName} (${formatTime12h(s.startTime)} - ${formatTime12h(s.endTime)})";
+              });
+            }
+            break;
+          }
+        }
+      }).catchError((_) {});
 
       // Fix 1: Only 2 parallel requests now — _fetchFactoryName() removed.
       // Factory name is derived locally from the _fetchFactories() result.
@@ -972,6 +989,41 @@ class _HomePageState extends State<HomePage> {
                                   style: const TextStyle(
                                       fontSize: 12, color: Colors.black54),
                                 ),
+                                if (_currentShiftLabel.isNotEmpty) ...[
+                                  const SizedBox(height: 4),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFF005C97).withValues(alpha: 0.08),
+                                      borderRadius: BorderRadius.circular(6),
+                                      border: Border.all(
+                                        color: const Color(0xFF005C97).withValues(alpha: 0.2),
+                                      ),
+                                    ),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        const Icon(
+                                          Icons.schedule_rounded,
+                                          size: 11,
+                                          color: Color(0xFF005C97),
+                                        ),
+                                        const SizedBox(width: 4),
+                                        Flexible(
+                                          child: Text(
+                                            _currentShiftLabel,
+                                            style: const TextStyle(
+                                              fontSize: 11,
+                                              fontWeight: FontWeight.w600,
+                                              color: Color(0xFF005C97),
+                                            ),
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
                               ],
                             ),
                           ),
