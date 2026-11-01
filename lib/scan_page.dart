@@ -14,6 +14,8 @@ import 'package:connectivity_plus/connectivity_plus.dart';
 import 'round_utils.dart';
 import 'offline_sync.dart';
 import 'models/patrol_round.dart';
+import 'services/voice_audio_service.dart';
+import 'services/time_sync_service.dart';
 
 class ScanningPage extends StatefulWidget {
   final String guardName;
@@ -123,7 +125,7 @@ class _ScanningPageState extends State<ScanningPage> {
 
   bool _isValidTime() {
     if (_factoryRounds.isNotEmpty) {
-      return getFactoryRoundStatus(DateTime.now(), _factoryRounds).isScanWindowActive;
+      return getFactoryRoundStatus(TimeSyncService.accurateNow, _factoryRounds).isScanWindowActive;
     }
     return false;
   }
@@ -386,6 +388,11 @@ class _ScanningPageState extends State<ScanningPage> {
     if (done) {
       if (!_showingCompleteDialog) {
         _showingCompleteDialog = true;
+
+        // Trigger voice audio cue for round complete
+        final status = getFactoryRoundStatus(TimeSyncService.accurateNow, _factoryRounds);
+        VoiceAudioService.speakRoundCompleted(status.activeRound?.roundNumber ?? 1);
+
         if (!mounted) return;
         showDialog(
           context: context,
@@ -431,6 +438,7 @@ class _ScanningPageState extends State<ScanningPage> {
     final index = _checkpoints.indexWhere((p) => _norm(p['qr_id']) == qrId);
 
     if (index == -1) {
+      VoiceAudioService.speakInvalidQr();
       _msg("UNKNOWN QR", Colors.orange);
       return;
     }
@@ -439,6 +447,7 @@ class _ScanningPageState extends State<ScanningPage> {
 
     // Already finished
     if (p['completed'] == true) {
+      VoiceAudioService.speakAlreadyScanned();
       _msg("ALREADY SCANNED", Colors.green);
       return;
     }
@@ -475,6 +484,7 @@ class _ScanningPageState extends State<ScanningPage> {
       // Keep one final _existsSuccess guard right before INSERT to prevent
       // duplicate rows in the rare case of race conditions between guards.
       if (await _existsSuccess(qrId)) {
+        VoiceAudioService.speakAlreadyScanned();
         _msg("ALREADY SCANNED", Colors.green);
         _fetchCheckpoints();
         return;
@@ -505,11 +515,15 @@ class _ScanningPageState extends State<ScanningPage> {
         'status': 'SUCCESS'
       };
 
+      final cpIndex = _checkpoints.indexWhere((c) => _norm(c['qr_id']) == _norm(p['qr_id']));
+      final cpNumber = cpIndex >= 0 ? cpIndex + 1 : 1;
+
       // OFFLINE SUPPORT: If no network is active, save to persistent cache queue
       if (!await _isOnline()) {
         await OfflineSyncManager.queueOfflineScan(scanPayload);
         _activeQrId = null;
         _msg('SAVED OFFLINE (WILL SYNC WHEN CONNECTED)', Colors.orange);
+        VoiceAudioService.speakCheckpointVerified(cpNumber, checkpointName: p['qr_name']?.toString());
         if (mounted) {
           setState(() {
             p['completed'] = true;
@@ -540,6 +554,7 @@ class _ScanningPageState extends State<ScanningPage> {
 
         _activeQrId = null;
         _msg('SCAN UPLOADED', Colors.green);
+        VoiceAudioService.speakCheckpointVerified(cpNumber, checkpointName: p['qr_name']?.toString());
 
         _fetchCheckpoints();
         _checkAutoLogout();
@@ -547,6 +562,7 @@ class _ScanningPageState extends State<ScanningPage> {
         final msg = e.toString();
 
         if (msg.contains('23505') || msg.contains('UNIQUE constraint failed')) {
+          VoiceAudioService.speakAlreadyScanned();
           _msg("ALREADY SCANNED", Colors.green);
           _fetchCheckpoints();
         } else {

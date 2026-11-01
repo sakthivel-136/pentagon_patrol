@@ -16,6 +16,8 @@ import 'models/patrol_round.dart';
 import 'app_updater.dart';
 import 'shift_utils.dart';
 import 'models/shift.dart';
+import 'services/time_sync_service.dart';
+import 'services/voice_audio_service.dart';
 
 final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
     FlutterLocalNotificationsPlugin();
@@ -113,11 +115,24 @@ class LoginScreen extends StatefulWidget {
 class _LoginScreenState extends State<LoginScreen> {
   final _pinCtrl = TextEditingController();
   bool _loading = false;
+  String _selectedVoiceLanguage = 'ta';
   static const String _kCachedUsersKey = 'pentagon_cached_users';
 
   @override
   void initState() {
     super.initState();
+
+    // 1. Initialize Voice & Audio Confirmation Service
+    VoiceAudioService.initialize().then((_) {
+      if (mounted) {
+        setState(() {
+          _selectedVoiceLanguage = VoiceAudioService.currentLanguage;
+        });
+      }
+    });
+
+    // 2. Pre-check Cloudflare Server Time Sync
+    TimeSyncService.checkServerTimeDrift();
 
     Future.delayed(const Duration(milliseconds: 500), () async {
       await _requestNotificationPermission();
@@ -348,6 +363,20 @@ class _LoginScreenState extends State<LoginScreen> {
         return;
       }
 
+      // 0. ANTI-CLOCK MANIPULATION & SERVER TIME DRIFT CHECK
+      // If guard changed device clock by > 60 seconds to cheat scan windows, block login!
+      final timeCheck = await TimeSyncService.checkServerTimeDrift();
+      if (!timeCheck.isSynced) {
+        _pinCtrl.clear();
+        if (mounted) {
+          _showTimeTamperedDialog(
+            driftSeconds: timeCheck.driftSeconds,
+            serverTime: timeCheck.serverTime,
+          );
+        }
+        return;
+      }
+
       // 1. FOR SECURITY GUARDS: ENFORCE SHIFT ALLOCATION CRITERIA
       // If it is not his shift timing, do not allow him even if scan window is open!
       final shiftCheck = await validateGuardShiftAccess(
@@ -368,9 +397,9 @@ class _LoginScreenState extends State<LoginScreen> {
         return;
       }
 
-      // 2. ENFORCE FACTORY'S DYNAMIC SCAN WINDOW
+      // 2. ENFORCE FACTORY'S DYNAMIC SCAN WINDOW (Uses accurate server-synchronized time)
       final rounds = await loadRoundsForFactory(factoryCode);
-      final status = getFactoryRoundStatus(DateTime.now(), rounds);
+      final status = getFactoryRoundStatus(TimeSyncService.accurateNow, rounds);
 
       if (status.isScanWindowActive) {
         // Window is OPEN -> allow login into scan interface
@@ -388,6 +417,158 @@ class _LoginScreenState extends State<LoginScreen> {
     } finally {
       if (mounted) setState(() => _loading = false);
     }
+  }
+
+// ================= TIME TAMPERED MODAL ==================
+
+  void _showTimeTamperedDialog({
+    required int driftSeconds,
+    required DateTime serverTime,
+  }) {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) {
+        final minutes = (driftSeconds / 60).toStringAsFixed(1);
+        return Dialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Warning Icon
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFEF2F2),
+                    shape: BoxShape.circle,
+                    border: Border.all(color: const Color(0xFFFCA5A5), width: 2),
+                  ),
+                  child: const Icon(
+                    Icons.access_time_filled_rounded,
+                    color: Color(0xFFDC2626),
+                    size: 44,
+                  ),
+                ),
+                const SizedBox(height: 16),
+
+                // Title
+                const Text(
+                  "DEVICE TIME OUT OF SYNC",
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                    color: Color(0xFFDC2626),
+                    letterSpacing: 0.5,
+                  ),
+                ),
+                const SizedBox(height: 4),
+
+                Text(
+                  "நேரம் பொருந்தவில்லை",
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.grey[700],
+                  ),
+                ),
+                const SizedBox(height: 16),
+
+                // Drift Info Container
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFFFBEB),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: const Color(0xFFFDE68A)),
+                  ),
+                  child: Column(
+                    children: [
+                      Text(
+                        "Time Difference: ~$driftSeconds sec ($minutes mins)",
+                        style: const TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                          color: Color(0xFF92400E),
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        "Server Time: ${serverTime.hour.toString().padLeft(2, '0')}:${serverTime.minute.toString().padLeft(2, '0')}:${serverTime.second.toString().padLeft(2, '0')}",
+                        style: const TextStyle(
+                          fontSize: 11,
+                          fontFamily: 'monospace',
+                          color: Color(0xFFB45309),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 16),
+
+                // Instructions in English & Tamil
+                const Text(
+                  "To prevent timing bypass, please enable 'Set time automatically' or 'Use network-provided time' in your Android Settings.",
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Color(0xFF475569),
+                    height: 1.4,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  "உங்கள் போன் செட்டிங்ஸில் தானியங்கி நேரத்தை (Automatic Date & Time) ஆன் செய்யவும்.",
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Color(0xFF475569),
+                    height: 1.4,
+                  ),
+                ),
+                const SizedBox(height: 22),
+
+                // Re-verify Button
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed: () async {
+                      Navigator.of(ctx).pop();
+                      final recheck = await TimeSyncService.checkServerTimeDrift();
+                      if (!recheck.isSynced && mounted) {
+                        _showTimeTamperedDialog(
+                          driftSeconds: recheck.driftSeconds,
+                          serverTime: recheck.serverTime,
+                        );
+                      } else {
+                        _showMsg("✅ Time synchronized successfully!");
+                      }
+                    },
+                    icon: const Icon(Icons.refresh, size: 18),
+                    label: const Text(
+                      "RE-VERIFY TIME / சரிபார்க்கவும்",
+                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                    ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF005C97),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
   }
 
 // ================= SHIFT BLOCKED MODAL ==================
@@ -690,7 +871,150 @@ class _LoginScreenState extends State<LoginScreen> {
                         ),
                       ),
 
-                      const SizedBox(height: 20),
+                      const SizedBox(height: 16),
+
+                      // VOICE LANGUAGE SELECTOR (குரல் உறுதிப்படுத்தல் மொழி)
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFF8FAFC),
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(color: const Color(0xFFE2E8F0)),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Row(
+                                  children: const [
+                                    Icon(
+                                      Icons.record_voice_over_rounded,
+                                      size: 15,
+                                      color: Color(0xFF005C97),
+                                    ),
+                                    SizedBox(width: 5),
+                                    Text(
+                                      "VOICE LANGUAGE",
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.bold,
+                                        color: Color(0xFF334155),
+                                        letterSpacing: 0.5,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                Text(
+                                  _selectedVoiceLanguage == 'ta' ? "தமிழ்" : "English",
+                                  style: const TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.bold,
+                                    color: Color(0xFF005C97),
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 8),
+                            Row(
+                              children: [
+                                // Tamil Option
+                                Expanded(
+                                  child: GestureDetector(
+                                    onTap: () {
+                                      setState(() => _selectedVoiceLanguage = 'ta');
+                                      VoiceAudioService.setLanguage('ta');
+                                    },
+                                    child: AnimatedContainer(
+                                      duration: const Duration(milliseconds: 200),
+                                      padding: const EdgeInsets.symmetric(vertical: 8),
+                                      decoration: BoxDecoration(
+                                        color: _selectedVoiceLanguage == 'ta'
+                                            ? const Color(0xFF005C97)
+                                            : Colors.white,
+                                        borderRadius: BorderRadius.circular(9),
+                                        border: Border.all(
+                                          color: _selectedVoiceLanguage == 'ta'
+                                              ? const Color(0xFF005C97)
+                                              : const Color(0xFFCBD5E1),
+                                        ),
+                                        boxShadow: _selectedVoiceLanguage == 'ta'
+                                            ? const [
+                                                BoxShadow(
+                                                  color: Color(0x40005C97),
+                                                  blurRadius: 4,
+                                                  offset: Offset(0, 2),
+                                                )
+                                              ]
+                                            : const [],
+                                      ),
+                                      alignment: Alignment.center,
+                                      child: Text(
+                                        "🇮🇳 தமிழ் (Tamil)",
+                                        style: TextStyle(
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 12,
+                                          color: _selectedVoiceLanguage == 'ta'
+                                              ? Colors.white
+                                              : const Color(0xFF475569),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                // English Option
+                                Expanded(
+                                  child: GestureDetector(
+                                    onTap: () {
+                                      setState(() => _selectedVoiceLanguage = 'en');
+                                      VoiceAudioService.setLanguage('en');
+                                    },
+                                    child: AnimatedContainer(
+                                      duration: const Duration(milliseconds: 200),
+                                      padding: const EdgeInsets.symmetric(vertical: 8),
+                                      decoration: BoxDecoration(
+                                        color: _selectedVoiceLanguage == 'en'
+                                            ? const Color(0xFF005C97)
+                                            : Colors.white,
+                                        borderRadius: BorderRadius.circular(9),
+                                        border: Border.all(
+                                          color: _selectedVoiceLanguage == 'en'
+                                              ? const Color(0xFF005C97)
+                                              : const Color(0xFFCBD5E1),
+                                        ),
+                                        boxShadow: _selectedVoiceLanguage == 'en'
+                                            ? const [
+                                                BoxShadow(
+                                                  color: Color(0x40005C97),
+                                                  blurRadius: 4,
+                                                  offset: Offset(0, 2),
+                                                )
+                                              ]
+                                            : const [],
+                                      ),
+                                      alignment: Alignment.center,
+                                      child: Text(
+                                        "🇬🇧 English",
+                                        style: TextStyle(
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 12,
+                                          color: _selectedVoiceLanguage == 'en'
+                                              ? Colors.white
+                                              : const Color(0xFF475569),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+
+                      const SizedBox(height: 16),
 
                       // PIN FIELD
                       TextField(

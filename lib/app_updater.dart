@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
+import 'd1_client.dart';
 
 class AppUpdateInfo {
   final String version;
@@ -50,7 +51,38 @@ class AppUpdater {
       final PackageInfo packageInfo = await PackageInfo.fromPlatform();
       final currentBuildNumber = int.tryParse(packageInfo.buildNumber) ?? 1;
 
-      // 1. Try version.json directly
+      // 1. Primary: Query Cloudflare D1 app_versions
+      try {
+        final d1Rows = await D1Client.query(
+          "SELECT latest_version, min_required_version, apk_download_url, release_notes, is_mandatory FROM app_versions WHERE is_active = 1 ORDER BY id DESC LIMIT 1;",
+        );
+        if (d1Rows.isNotEmpty) {
+          final row = d1Rows.first;
+          final latestVer = row['latest_version']?.toString() ?? '1.0.0';
+          final minVer = row['min_required_version']?.toString() ?? '1.0.0';
+          final apkUrl = row['apk_download_url']?.toString() ??
+              'https://drive.usercontent.google.com/download?id=FILE_ID&export=download&confirm=t';
+          final notes = row['release_notes']?.toString() ??
+              'Security updates, accurate 20-min scan window, and Tamil/English audio cues.';
+          final isMandatory = (row['is_mandatory'] == 1 || _isNewerVersion(minVer, packageInfo.version));
+
+          if (_isNewerVersion(latestVer, packageInfo.version) ||
+              _isNewerVersion(minVer, packageInfo.version)) {
+            return AppUpdateInfo(
+              version: latestVer,
+              buildNumber: currentBuildNumber + 1,
+              downloadUrl: apkUrl,
+              releaseNotes: notes,
+              isMandatory: isMandatory,
+            );
+          }
+          return null; // Already up to date
+        }
+      } catch (e) {
+        debugPrint('[AppUpdater] Cloudflare D1 check error: $e. Falling back...');
+      }
+
+      // 2. Fallback: Try version.json directly
       try {
         final res = await http.get(Uri.parse(_versionJsonUrl)).timeout(const Duration(seconds: 7));
         if (res.statusCode == 200) {
