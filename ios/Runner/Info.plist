@@ -66,5 +66,11 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>Camera access is required to scan patrol checkpoint QR codes.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Location access is required to verify guard presence at checkpoint locations.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Location access is required to verify guard presence at checkpoint locations.</string>
 </dict>
 </plist>
